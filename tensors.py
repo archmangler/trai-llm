@@ -152,3 +152,51 @@ torch.save(model.state_dict(), "model.pth")
 #Once we saved the model, we can restore it from disk:
 model = NeuralNetwork(2, 2)
 model.load_state_dict(torch.load("model.pth"))
+
+
+# Configure to run on GPU: First check for GPU
+print(torch.cuda.is_available())
+
+# suppose we have two tensors that we can add; this computation will be carried out on the CPU by default:
+tensor_1 = torch.tensor([1., 2., 3.])
+tensor_2 = torch.tensor([4., 5., 6.])
+print(tensor_1 + tensor_2)
+
+#Do a tensor calculation on a CUDA capable GPU
+#tensor_1 = tensor_1.to("cuda")
+#tensor_2 = tensor_2.to("cuda")
+#print(tensor_1 + tensor_2) # tensor([5., 7., 9.])
+
+# The same training loop on a GPU
+torch.manual_seed(123)
+model = NeuralNetwork(num_inputs=2, num_outputs=2)
+device = torch.device(
+    "mps" if torch.backends.mps.is_available() else "cpu"
+)
+model = model.to(device)
+optimizer = torch.optim.SGD(model.parameters(), lr=0.5)
+num_epochs = 3
+
+#Defines a device variable that defaults to a GPU
+#Transfers the model onto the GPU
+#Transfers the data onto the GPU
+for epoch in range(num_epochs):
+    model.train()
+    for batch_idx, (features, labels) in enumerate(train_loader):
+        features, labels = features.to(device), labels.to(device)
+        logits = model(features)
+        loss = F.cross_entropy(logits, labels) # Loss function
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+                ### LOGGING
+        print(f"Epoch: {epoch+1:03d}/{num_epochs:03d}"
+              f" | Batch {batch_idx:03d}/{len(train_loader):03d}"
+              f" | Train/Val Loss: {loss:.2f}")
+    model.eval()
+    # Insert optional model evaluation code
+
+# Note:
+#We can also modify the statement, which will make the same code exe- cutable on a CPU if a GPU is not available. This is considered best practice when shar- ing PyTorch code:
+#device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
