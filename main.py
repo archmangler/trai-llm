@@ -219,5 +219,8 @@ for i in range(1, context_size+1):
     print(tokenizer.decode(context), "---->", tokenizer.decode([desired]))
 
 #Check if gpu available.
-print("Can access GPU? -> ", torch.cuda.is_available())
+print("Can access NVIDIA GPU? -> ", torch.cuda.is_available())
+print("Can access the Apple Silicon GPU? ", torch.backends.mps.is_available())
+
+
 
