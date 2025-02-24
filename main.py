@@ -326,5 +326,5 @@ print(pos_embeddings.shape)
 input_embeddings = token_embeddings + pos_embeddings
 print(input_embeddings.shape)
 
-
+# Checkpoint: The data is now in a position to be processed by an LLM
 
