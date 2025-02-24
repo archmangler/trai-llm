@@ -328,3 +328,9 @@ print(input_embeddings.shape)
 
 # Checkpoint: The data is now in a position to be processed by an LLM
 
+# Next: The Attention Mechanism.
+#1. Why attention mechanisms in neural networks
+#2. Basic self-attention framework, progressing to an enhanced self-attention mechanism
+#3. A causal attention module that allows LLMs to generate one token at a time
+#4. Masking randomly selected attention weights with dropout to reduce overfitting
+#5. Stacking multiple causal attention modules into a multi-head attention module
