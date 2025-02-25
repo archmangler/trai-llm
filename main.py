@@ -9,6 +9,10 @@ import sys
 print(sys.executable)
 print(sys.path)
 
+# Naive softmax for normalisation
+def softmax_naive(x):
+    return torch.exp(x) / torch.exp(x).sum(dim=0)
+
 #before the introduction of unknown token handling:
 class SimpleTokenizerV1:
     def __init__(self, vocab):
@@ -334,3 +338,90 @@ print(input_embeddings.shape)
 #3. A causal attention module that allows LLMs to generate one token at a time
 #4. Masking randomly selected attention weights with dropout to reduce overfitting
 #5. Stacking multiple causal attention modules into a multi-head attention module
+
+inputs = torch.tensor(
+  [[0.43, 0.15, 0.89], # Your     (x^1)
+   [0.55, 0.87, 0.66], # journey  (x^2)
+[0.57, 0.85, 0.64], # starts (x^3)
+[0.22, 0.58, 0.33], # with (x^4)
+[0.77, 0.25, 0.10], # one (x^5)
+[0.05, 0.80, 0.55]] # step (x^6)
+)
+
+# Calculate the intermediate attention scores between the query token and each input token. 
+# Determine these scores by computing the dot product of the query, x(2), with every other input token:
+query = inputs[1]
+attn_scores_2 = torch.empty(inputs.shape[0])
+for i, x_i in enumerate(inputs):
+    attn_scores_2[i] = torch.dot(x_i, query)
+print("Preliminary attention scores: ", attn_scores_2)
+
+# normalize each of the attention scores we computed previously. The main goal behind the normalization is to obtain attention weights that sum up to 1.
+attn_weights_2_tmp = attn_scores_2 / attn_scores_2.sum()
+print("Attention weights:", attn_weights_2_tmp)
+print("Sum:", attn_weights_2_tmp.sum())
+
+# Use the softmax function for normal- ization. This approach is better at managing extreme values
+# softmax function ensures that the attention weights are always posi- tive. 
+# This makes the output interpretable as probabilities or relative importance, where higher weights indicate greater importance.
+attn_weights_2_naive = softmax_naive(attn_scores_2)
+print("Attention weights:", attn_weights_2_naive)
+print("Sum:", attn_weights_2_naive.sum())
+
+# Better to use the pytorch implementation of Softmax:
+attn_weights_2 = torch.softmax(attn_scores_2, dim=0)
+print("Attention weights:", attn_weights_2)
+print("Sum:", attn_weights_2.sum())
+
+# We have now computed the normalized attention weights
+# It's all about the Context Vector!
+# The final step, after calculating and normalizing the attention scores to obtain the attention weights for a query, is to compute the context vector. 
+# This context vector is a combination of all input vectors x(1) to x(T) weighted by the the attention weights.
+query = inputs[1]
+context_vec_2 = torch.zeros(query.shape)
+for i,x_i in enumerate(inputs):
+    context_vec_2 += attn_weights_2[i]*x_i
+print(context_vec_2)
+
+# Computing attention weights for all input tokens
+attn_scores = torch.empty(6, 6)
+for i, x_i in enumerate(inputs):
+    for j, x_j in enumerate(inputs):
+        attn_scores[i, j] = torch.dot(x_i, x_j)
+
+#The normalised attention score will be printed.
+print("With for-loops", attn_scores)
+
+# tensor([[0.9995, 0.9544, 0.9422, 0.4753, 0.4576, 0.6310],
+#        [0.9544, 1.4950, 1.4754, 0.8434, 0.7070, 1.0865],
+#        [0.9422, 1.4754, 1.4570, 0.8296, 0.7154, 1.0605],
+#        [0.4753, 0.8434, 0.8296, 0.4937, 0.3474, 0.6565],
+#        [0.4576, 0.7070, 0.7154, 0.3474, 0.6654, 0.2935],
+#        [0.6310, 1.0865, 1.0605, 0.6565, 0.2935, 0.9450]])
+
+# Matrix multiplication is faster than for loops:
+attn_scores = inputs @ inputs.T
+print("With Matrix Multiplication: ",attn_scores)
+
+#Recap:
+# 1. Compute the attention scores as dot products between the inputs.
+# 2. The attention weights are a normalized version of the attention scores.
+# 3. The context vectors are computed as a weighted sum over the inputs.
+
+# normalize each row so that the values in each row sum to 1:
+attn_weights = torch.softmax(attn_scores, dim=-1)
+print("Per-row normalization: ",attn_weights)
+
+# verify that the rows all sum to 1:
+row_2_sum = sum([0.1385, 0.2379, 0.2333, 0.1240, 0.1082, 0.1581])
+print("Row 2 sum:", row_2_sum)
+print("All row sums:", attn_weights.sum(dim=-1))
+
+# compute all context vectors via matrix multiplication:
+all_context_vecs = attn_weights @ inputs
+print("Computing all context vectors: ", all_context_vecs)
+
+
+
+
+
