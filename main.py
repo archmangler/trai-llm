@@ -886,4 +886,8 @@ for i, (y, label) in enumerate(zip([y_gelu, y_relu], ["GELU", "ReLU"]), 1):
 plt.tight_layout()
 #plt.show()
 
-
+# initialize a new FeedForward module with a token embedding size of 768 and feed it a batch input with two samples and three tokens each:
+ffn = FeedForward(GPT_CONFIG_124M)
+x = torch.rand(2, 3, 768)
+out = ffn(x)
+print("Output of feedforward NN: ", out.shape)
