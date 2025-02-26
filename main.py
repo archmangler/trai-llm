@@ -7,10 +7,99 @@ from torch.utils.data import Dataset, DataLoader
 import sys
 import torch.nn as nn
 import matplotlib.pyplot as plt
-
+# from chapter03 import MultiHeadAttention
 
 print(sys.executable)
 print(sys.path)
+
+
+
+# The GPT model architecture implementation
+class GPTModel(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        self.tok_emb = nn.Embedding(cfg["vocab_size"], cfg["emb_dim"])
+        self.pos_emb = nn.Embedding(cfg["context_length"], cfg["emb_dim"])
+        self.drop_emb = nn.Dropout(cfg["drop_rate"])
+        self.trf_blocks = nn.Sequential(
+            *[TransformerBlock(cfg) for _ in range(cfg["n_layers"])])
+        self.final_norm = LayerNorm(cfg["emb_dim"])
+        self.out_head = nn.Linear(
+            cfg["emb_dim"], cfg["vocab_size"], bias=False
+        )
+    def forward(self, in_idx):
+        batch_size, seq_len = in_idx.shape
+        tok_embeds = self.tok_emb(in_idx) 
+        pos_embeds = self.pos_emb(
+            torch.arange(seq_len, device=in_idx.device) # The device setting will allow us to train the model on a CPU or GPU, depending on which device the input data sits on.
+        )
+        x = tok_embeds + pos_embeds
+        x = self.drop_emb(x)
+        x = self.trf_blocks(x)
+        x = self.final_norm(x)
+        logits = self.out_head(x)
+        return logits
+
+# The transformer block component of GPT
+# This code defines a TransformerBlock class in PyTorch that includes a multi-head attention mechanism (MultiHeadAttention) and a feed forward network (Feed- Forward), both configured based on a provided configuration dictionary (cfg), such as GPT_CONFIG_124M.
+# Layer normalization (LayerNorm) is applied before each of these two components, and dropout is applied after them to regularize the model and prevent overfitting. This is also known as Pre-LayerNorm.
+# Older architectures, such as the original transformer model, applied layer normalization after the self-attention and feed forward networks instead, known as Post-LayerNorm, which often leads to worse training dynamics.
+class TransformerBlock(nn.Module):
+
+    def __init__(self, cfg):
+        super().__init__()
+        self.att = MultiHeadAttention(
+            d_in=cfg["emb_dim"],
+            d_out=cfg["emb_dim"],
+            context_length=cfg["context_length"],
+            num_heads=cfg["n_heads"],
+            dropout=cfg["drop_rate"],
+            qkv_bias=cfg["qkv_bias"])
+        self.ff = FeedForward(cfg)
+        self.norm1 = LayerNorm(cfg["emb_dim"])
+        self.norm2 = LayerNorm(cfg["emb_dim"])
+        self.drop_shortcut = nn.Dropout(cfg["drop_rate"])
+
+    def forward(self, x):
+        shortcut = x
+        x = self.norm1(x)
+        x = self.att(x)
+        x = self.drop_shortcut(x)
+        x = x + shortcut                # add the original input back
+        shortcut = x                    # shortcut connection for feedforward bloc
+        x = self.norm2(x)
+        x = self.ff(x)
+        x = self.drop_shortcut(x)
+        x = x + shortcut                # add the original input back
+        return x
+
+
+
+# A neural network to illustrate shortcut connections
+class ExampleDeepNeuralNetwork(nn.Module):
+    def __init__(self, layer_sizes, use_shortcut):
+        super().__init__()
+        self.use_shortcut = use_shortcut
+        self.layers = nn.ModuleList([
+            nn.Sequential(nn.Linear(layer_sizes[0], layer_sizes[1]),
+                          GELU()),
+            nn.Sequential(nn.Linear(layer_sizes[1], layer_sizes[2]),
+                          GELU()),
+            nn.Sequential(nn.Linear(layer_sizes[2], layer_sizes[3]),
+                          GELU()),
+            nn.Sequential(nn.Linear(layer_sizes[3], layer_sizes[4]),
+                          GELU()),
+            nn.Sequential(nn.Linear(layer_sizes[4], layer_sizes[5]),
+                          GELU())
+                          ])
+    def forward(self, x):
+        for layer in self.layers: #Check if shortcut can be applied
+            layer_output = layer(x)
+            if self.use_shortcut and x.shape == layer_output.shape:
+                x = x + layer_output
+            else:
+                x = layer_output
+        return x
 
 # A feed forward neural network module
 class FeedForward(nn.Module):
@@ -457,13 +546,13 @@ data_iter = iter(dataloader)
 first_batch = next(data_iter)
 print(first_batch)
 
-#To understand the meaning of stride=1, let’s fetch another batch from this dataset: 
+#To understand the meaning of stride=1, let's fetch another batch from this dataset: 
 second_batch = next(data_iter)
 print(second_batch)
 
 # The second batch has the following contents: [tensor([[ 367, 2885, 1464, 1807]]), tensor([[2885, 1464, 1807, 3619]])]
-# If we compare the first and second batches, we can see that the second batch’s token IDs are shifted by one position 
-# (for example, the second ID in the first batch’s input is 367, which is the first ID of the second batch’s input). 
+# If we compare the first and second batches, we can see that the second batch's token IDs are shifted by one position 
+# (for example, the second ID in the first batch's input is 367, which is the first ID of the second batch's input). 
 # The stride setting dictates the number of positions the inputs shift across batches, emulating a sliding window approach
 
 # small batch sizes require less memory during training but lead to more noisy model updates. Just like in regular deep learning, the batch size is a tradeoff and a hyperparameter to experiment with when training LLMs.
@@ -491,7 +580,7 @@ output_dim = 3
 # 4. instantiate an embedding layer in PyTorch, setting the random seed to 123 for reproducibility purposes:
 torch.manual_seed(123)
 embedding_layer = torch.nn.Embedding(vocab_size, output_dim)
-print(embedding_layer.weight) # prints the embedding layer’s underlying weight matrix
+print(embedding_layer.weight) # prints the embedding layer's underlying weight matrix
 
 # 5. apply it to a token ID to obtain the embedding vector:
 print(embedding_layer(torch.tensor([3])))
@@ -649,10 +738,10 @@ key_2 = x_2 @ W_key
 value_2 = x_2 @ W_value
 print("Resulting query vector: ", query_2)
 
-# Note: In the weight matrices W, the term “weight” is short for “weight parameters,” the values of a neural network that are optimized during training. 
+# Note: In the weight matrices W, the term "weight" is short for "weight parameters," the values of a neural network that are optimized during training. 
 # This is not to be confused with the attention weights. As we already saw, attention weights determine the extent to which a context vector depends on 
 # the different parts of the input (i.e., to what extent the network focuses on different parts of the input). In summary, weight parameters are the fundamental, 
-# learned coefficients that define the network’s connections, while attention weights are dynamic, context-specific values.
+# learned coefficients that define the network's connections, while attention weights are dynamic, context-specific values.
 
 # we still require the key and value vectors for all input elements as they are involved in com- puting the attention weights with respect to the query 
 # obtain all keys and values via matrix multiplication:
@@ -688,7 +777,7 @@ print("The attention weights: ", attn_weights_2)
 context_vec_2 = attn_weights_2 @ values
 print("Resulting context vector: ", context_vec_2)
 
-# Checkpoint: we’ve only computed a single context vector. 
+# Checkpoint: we've only computed a single context vector. 
 # Next, we will generalize the code to compute all context vectors in the input sequence
 
 # Using a compact self-attention Python class
@@ -716,7 +805,7 @@ attn_scores = queries @ keys.T
 attn_weights = torch.softmax(attn_scores / keys.shape[-1]**0.5, dim=-1)
 print("Attention weights using softmax function: ", attn_weights)
 
-# Next step: Use PyTorch’s tril function to create a mask where the values above the diagonal in the tensor are zero:
+# Next step: Use PyTorch's tril function to create a mask where the values above the diagonal in the tensor are zero:
 context_length = attn_scores.shape[0]
 mask_simple = torch.tril(torch.ones(context_length, context_length))
 print("Mask for causal attention masking: ", mask_simple)
@@ -834,7 +923,7 @@ layer = nn.Sequential(nn.Linear(5, 6), nn.ReLU())
 out = layer(batch_example)
 print("Neural Network Layer: ", out)
 
-# Before we apply layer normalization to these outputs, let’s examine the mean and variance of each row:
+# Before we apply layer normalization to these outputs, let's examine the mean and variance of each row:
 mean = out.mean(dim=-1, keepdim=True)
 var = out.var(dim=-1, keepdim=True)
 print("Mean:\n", mean)
@@ -869,7 +958,7 @@ print("Variance:\n", var)
 # Next: Implement and test the GELU activation func- tion, which is one of the activation functions used in LLMs, instead of the traditional ReLU function we used previously.
 
 # first: check we have th GeLU activation function
-# The smoothness of GELU can lead to better optimization properties during training, as it allows for more nuanced adjustments to the model’s parameters. 
+# The smoothness of GELU can lead to better optimization properties during training, as it allows for more nuanced adjustments to the model's parameters. 
 # ReLU has a sharp corner at zero (figure 4.18, right), which can sometimes make opti- mization harder, especially in networks that are very deep or have complex architec- tures
 
 gelu, relu = GELU(), nn.ReLU()
@@ -891,3 +980,127 @@ ffn = FeedForward(GPT_CONFIG_124M)
 x = torch.rand(2, 3, 768)
 out = ffn(x)
 print("Output of feedforward NN: ", out.shape)
+
+# The FeedForward module plays a crucial role in enhancing the model's ability to learn from and generalize the data. 
+# Although the input and output dimensions of this module are the same, it internally expands the embedding dimension into a higher-dimensional space through the first linear layer, 
+# This expansion is followed by a nonlinear GELU activation and then a contraction back to the original dimension with the second linear transformation. 
+# Such a design allows for the exploration of a richer representation space. (But wtf for???)
+
+# The Vanishing Gradient problem: The vanishing gradient problem refers to the issue where gradients (which guide weight updates during training) become progressively smaller as they 
+# propagate backward through the layers, making it difficult to effectively train earlier layers.
+# Shortcut Connections: Originally, shortcut connections were proposed for deep networks in computer vision (specifically, in residual networks) to mitigate the challenge of van- ishing gradients. 
+# A shortcut connection creates an alternative, shorter path for the gradient to flow through the network by skipping one or more layers, which is achieved by adding the output of one layer to the output of a later layer. 
+# This is why these connections are also known as skip connections. They play a crucial role in pre- serving the flow of gradients during the backward pass in training.
+    
+#  A neural network to illustrate shortcut connections
+layer_sizes = [3, 3, 3, 3, 3, 1]
+sample_input = torch.tensor([[1., 0., -1.]])
+torch.manual_seed(123)
+model_without_shortcut = ExampleDeepNeuralNetwork(
+    layer_sizes, use_shortcut=False
+)
+
+# Implement a function that computes the gradients in the model's back- ward pass:
+def print_gradients(model, x):
+    output = model(x)
+    target = torch.tensor([[0.]])
+    loss = nn.MSELoss()
+    loss = loss(output, target)
+    loss.backward()
+    for name, param in model.named_parameters():
+        if 'weight' in name:
+            print(f"{name} has gradient mean of {param.grad.abs().mean().item()}")
+
+# use the print_gradients function and apply it to the model without skip connections:
+# output of the print_gradients function shows, the gradients become smaller as we progress from the last layer (layers.4) to the first layer (layers.0), which is a phenomenon called the vanishing gradient problem.
+print_gradients(model_without_shortcut, sample_input)
+
+#  now instantiate a model with skip connections and see how it compares:
+model_with_shortcut = ExampleDeepNeuralNetwork(
+    layer_sizes, use_shortcut=True
+)
+
+print("\nPrinting with model now using shortcuts\n")
+
+print_gradients(model_with_shortcut, sample_input)
+
+# The last layer (layers.4) still has a larger gradient than the other layers. 
+# However, the gradient value stabilizes as we progress toward the first layer (layers.0) 
+# and doesn't shrink to a vanishingly small value.
+
+# Next: Create a transformer module and connect all the preceding modules to complete the GPT architecture.
+
+# Theory: The self-attention mechanism in the multi-head attention block identifies and analyzes relationships between elements in the input sequence. 
+# The feed forward network modifies the data individually at each position of the input sequence. This combination enables an "understanding" and capacity to process input for complex data patterns ("draw complex relationships").
+# 
+
+# Instantiate a transformer block and input sample data:
+torch.manual_seed(123)
+x = torch.rand(2, 4, 768)
+block = TransformerBlock(GPT_CONFIG_124M)
+output = block(x)
+print("[Transformer Bloc] Input shape:", x.shape)
+print("[Transformer Bloc] Output shape:", output.shape) 
+# Note: the transformer architecture should process sequences of data without altering their shape throughout the network. So the input dimension should be same as output dimension.
+# Each output vector must directly correspond to an input vector, maintaining a one-to-one relationship
+# The output is a context vector that encapsulates information from the entire input sequence (see chapter 3). 
+# This means that while the physical dimensions of the sequence (length and feature size) remain unchanged as it passes through the trans- former block, the content of each output 
+# vector is re-encoded to integrate contextual information from across the entire input sequence.
+
+# Recap: The transformer block combines layer normalization, the feed forward network, GELU activa- tions, and shortcut connections. It makes up the main component of the GPT architecture.
+
+torch.manual_seed(123)
+model = GPTModel(GPT_CONFIG_124M)
+out = model(batch)
+print("[RealGPTModel] Input batch:\n", batch)
+print("\n[RealGPTModel] Output shape:", out.shape)
+print(out)
+
+total_params = sum(p.numel() for p in model.parameters())
+print(f"Total number of parameters: {total_params:,}")
+
+# compute the memory requirements of the 163 million parameters (compute the memory requirements of the 163 million parameters)
+total_size_bytes = total_params * 4
+total_size_mb = total_size_bytes / (1024 * 1024)
+print(f"Total size of the model: {total_size_mb:.2f} MB")
+
+# Next:  write the code to convert these output tensors into text. 
+# A function for the GPT model to generate text:
+
+def generate_text_simple(model, idx, max_new_tokens, context_size): #idx is a (batch, n_tokens) array of indices in the current context.
+    for _ in range(max_new_tokens):
+        idx_cond = idx[:, -context_size:]
+        with torch.no_grad():
+            logits = model(idx_cond) #Focuses only on the last time step, so that(batch,n_token,vocab_size) becomes (batch, vocab_size)
+            logits = logits[:, -1, :]
+            probas = torch.softmax(logits, dim=-1)
+            idx_next = torch.argmax(probas, dim=-1, keepdim=True)
+            idx = torch.cat((idx, idx_next), dim=1)
+    return idx
+
+
+# Test text generation output: encode the input context into token IDs:
+start_context = "Hello, I am"
+encoded = tokenizer.encode(start_context)
+print("encoded:", encoded)
+encoded_tensor = torch.tensor(encoded).unsqueeze(0)
+print("encoded_tensor.shape:", encoded_tensor.shape)
+
+model.eval() #Disables dropout since we are not training the model
+out = generate_text_simple(
+    model=model,
+    idx=encoded_tensor,
+    max_new_tokens=6,
+    context_size=GPT_CONFIG_124M["context_length"]
+    )
+print("Output:", out)
+print("Output length:", len(out[0]))
+
+#At this point we'll get the untrained output prediction
+#which will not be very good. 
+decoded_text = tokenizer.decode(out.squeeze(0).tolist())
+print("Decoded text with prediction: ",decoded_text)
+
+#We need to now train our model before we an get anything better.
+
+# Recap: We have implemented the GPT architecture and initialized a GPT model instance with initial random weights.
