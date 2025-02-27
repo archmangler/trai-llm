@@ -1,18 +1,106 @@
 import urllib.request
 import re
 from importlib.metadata import version
+import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
 import tiktoken
 import torch
 from torch.utils.data import Dataset, DataLoader
 import sys
 import torch.nn as nn
 import matplotlib.pyplot as plt
-# from chapter03 import MultiHeadAttention
+from gpt_download import download_and_load_gpt2
 
 print(sys.executable)
 print(sys.path)
 
+#We can further control the distribution and selection process via a concept called temperature scaling. 
+# Temperature scaling is just a fancy description for dividing the logits by a number greater than 0:
+def softmax_with_temperature(logits, temperature):
+    scaled_logits = logits / temperature
+    return torch.softmax(scaled_logits, dim=0)
 
+
+def print_sampled_tokens(probas):
+    torch.manual_seed(123)
+    sample = [torch.multinomial(probas, num_samples=1).item()
+             for i in range(1_000)]
+    sampled_ids = torch.bincount(torch.tensor(sample))
+    for i, freq in enumerate(sampled_ids):
+        print(f"{freq} x {inverse_vocab[i]}")
+
+def plot_losses(epochs_seen, tokens_seen, train_losses, val_losses):
+    fig, ax1 = plt.subplots(figsize=(5, 3))
+    ax1.plot(epochs_seen, train_losses, label="Training loss")
+    ax1.plot(
+        epochs_seen, val_losses, linestyle="-.", label="Validation loss"
+    )
+    ax1.set_xlabel("Epochs")
+    ax1.set_ylabel("Loss")
+    ax1.legend(loc="upper right")
+    ax1.xaxis.set_major_locator(MaxNLocator(integer=True))
+    ax2 = ax1.twiny()
+    ax2.plot(tokens_seen, train_losses, alpha=0)
+    ax2.set_xlabel("Tokens seen")
+    fig.tight_layout()
+    plt.show()
+
+# Adam optimizers are a popular choice for training deep neural networks. However, in our training loop, we opt for the AdamW optimizer. 
+# AdamW is a variant of Adam that improves the weight decay approach, which aims to minimize model complexity and prevent overfitting by penalizing larger weights. 
+# This adjustment allows AdamW to achieve more effective regularization and better generalization; thus, AdamW is fre- quently used in the training of LLMs.
+def train_model_simple(model, train_loader, val_loader, optimizer, device, num_epochs, eval_freq, eval_iter, start_context, tokenizer):
+    train_losses, val_losses, track_tokens_seen = [], [], [] # Initializes lists to track losses and tokens seen
+    tokens_seen, global_step = 0, -1
+    for epoch in range(num_epochs): # Starts the main training loop
+        model.train()
+        for input_batch, target_batch in train_loader:
+            optimizer.zero_grad() # Resets loss gradients from the previous batch iteration
+            loss = calc_loss_batch(
+                input_batch, target_batch, model, device
+                )
+            loss.backward()
+            optimizer.step()
+            tokens_seen += input_batch.numel()
+            global_step += 1
+            if global_step % eval_freq == 0:
+                train_loss, val_loss = evaluate_model(
+                    model, train_loader, val_loader, device, eval_iter)
+                train_losses.append(train_loss)
+                val_losses.append(val_loss)
+                track_tokens_seen.append(tokens_seen)
+                print(f"Ep {epoch+1} (Step {global_step:06d}): "
+                      f"Train loss {train_loss:.3f}, "
+                      f"Val loss {val_loss:.3f}"
+                      )
+        generate_and_print_sample(
+            model, tokenizer, device, start_context
+        )
+    return train_losses, val_losses, track_tokens_seen
+
+def generate_and_print_sample(model, tokenizer, device, start_context):
+    model.eval()
+    context_size = model.pos_emb.weight.shape[0]
+    encoded = text_to_token_ids(start_context, tokenizer).to(device)
+    with torch.no_grad():
+        token_ids = generate_text_simple(
+            model=model, idx=encoded,
+            max_new_tokens=50, context_size=context_size
+        )
+    decoded_text = token_ids_to_text(token_ids, tokenizer)
+    print(decoded_text.replace("\n", " "))
+    model.train()
+
+def evaluate_model(model, train_loader, val_loader, device, eval_iter):
+    model.eval() # Dropout is disabled during evaluation for stable, reproducible results.
+    with torch.no_grad(): # Disables gradient tracking, which is not required during evaluation, to reduce the computational overhead
+        train_loss = calc_loss_loader(
+            train_loader, model, device, num_batches=eval_iter
+        )
+        val_loss = calc_loss_loader(
+            val_loader, model, device, num_batches=eval_iter
+        )
+    model.train()
+    return train_loss, val_loss
 
 # The GPT model architecture implementation
 class GPTModel(nn.Module):
@@ -1104,3 +1192,327 @@ print("Decoded text with prediction: ",decoded_text)
 #We need to now train our model before we an get anything better.
 
 # Recap: We have implemented the GPT architecture and initialized a GPT model instance with initial random weights.
+
+# Next: Initialise the GPT model that we will later evaluate and train using the GPTModel class and GPT_CONFIG_124M dictionary
+
+GPT_CONFIG_124M = {
+    "vocab_size": 50257,
+    "context_length": 256, # reduce the context length (context_ length) to 256 tokens. This modification reduces the computational demands of training the model, making it possible to carry out the training on a standard laptop computer.
+    "emb_dim": 768,
+    "n_heads": 12,
+    "n_layers": 12,
+    "drop_rate": 0.1,
+    "qkv_bias": False
+}
+torch.manual_seed(123)
+model = GPTModel(GPT_CONFIG_124M)
+model.eval()
+
+# Utility functions for text to token ID conversion
+def text_to_token_ids(text, tokenizer):
+    encoded = tokenizer.encode(text, allowed_special={'<|endoftext|>'})
+    encoded_tensor = torch.tensor(encoded).unsqueeze(0)
+    return encoded_tensor
+
+def token_ids_to_text(token_ids, tokenizer):
+    flat = token_ids.squeeze(0) # Remove batch dimension
+    return tokenizer.decode(flat.tolist())
+
+#arbitrary sentence we want to aut-complete
+start_context = "Every effort moves you"
+
+#Select and instantiate the tokenizer
+tokenizer = tiktoken.get_encoding("gpt2")
+
+token_ids = generate_text_simple(
+    model=model,idx=text_to_token_ids(start_context, tokenizer),max_new_tokens=10, context_size=GPT_CONFIG_124M["context_length"]
+    )
+
+print("Output text:\n", token_ids_to_text(token_ids, tokenizer))
+
+# To define what makes text “coherent” or “high quality,” we have to imple- ment a numerical method to evaluate the generated content.
+# calculate a loss metric for the generated outputs. This loss serves as a progress and success indicator of the training progress. 
+# review additional methodologies for assess- ing model quality.
+
+# Feed the inputs into the model to calculate logits vectors for the two input examples, each comprising three tokens. 
+# Then we apply the softmax function to transform these logits into probability scores
+
+
+inputs = torch.tensor([[16833, 3626, 6100],   # ["every effort moves",
+                             [40,    1107, 588]])   #  "I really like"]
+
+targets = torch.tensor([[3626, 6100, 345  ],  # [" effort moves you",
+                              [1107, 588, 11311]])  #  " really like chocolate"]
+with torch.no_grad():
+    logits = model(inputs)
+probas = torch.softmax(logits, dim=-1)
+print("The tensor dimension of the probability score tensor -> ",probas.shape)
+
+# The first number, 2, corresponds to the two examples (rows) in the inputs, also known as batch size. 
+# The second number, 3, corresponds to the number of tokens in each input (row). 
+# Finally, the last number corresponds to the embedding dimensionality, which is determined by the vocabulary size.
+
+# applying the argmax function to the probability scores to obtain the corresponding token IDs:
+token_ids = torch.argmax(probas, dim=-1, keepdim=True)
+print("Token IDs:\n", token_ids)
+
+print(f"Targets batch 1: {token_ids_to_text(targets[0], tokenizer)}")
+print(f"Outputs batch 1:"
+      f" {token_ids_to_text(token_ids[0].flatten(), tokenizer)}")
+
+text_idx = 0
+target_probas_1 = probas[text_idx, [0, 1, 2], targets[text_idx]]
+print("Text 1:", target_probas_1)
+
+text_idx = 1
+target_probas_2 = probas[text_idx, [0, 1, 2], targets[text_idx]]
+print("Text 2:", target_probas_2)
+
+# Backpropagation
+# How do we maximize the softmax probability values corresponding to the target tokens? 
+# The big picture is that we update the model weights so that the model outputs higher values for the respective token IDs we want to generate. 
+# The weight update is done via a process called backpropagation, a standard technique for training deep neural networks (see sections A.3 to A.7 in appendix A for more details about back- propagation and model training).
+# Backpropagation requires a loss function, which calculates the difference between the model’s predicted output (here, the probabilities corresponding to the target token IDs) and the actual desired output. 
+# This loss function measures how far off the model’s predictions are from the target values.
+
+
+# Calculating the loss involves several steps. Steps 1 to 3, which we have already completed, calculate the token probabilities corresponding to the target tensors. These probabilities are then transformed via a logarithm and averaged in steps 4 to 6.
+# Logits 
+# Probabilities
+# Target probabilities
+# Log probabilities
+# Average log probability
+# Negative average log probability
+
+log_probas = torch.log(torch.cat((target_probas_1, target_probas_2))) # why apply a log here?
+print("Log probabilities: ", log_probas) 
+
+# Note: Working with logarithms of probability scores is more manageable in mathematical optimization than handling the scores directly. 
+
+# Combine these log probabilities into a single score by computing the average 
+avg_log_probas = torch.mean(log_probas)
+print("Average of the log probability scores: ", avg_log_probas)
+
+# Before we apply the cross_entropy function, let’s briefly recall the shape of the logits and target tensors:
+print("Logits shape:", logits.shape)
+print("Targets shape:", targets.shape)
+
+logits_flat = logits.flatten(0, 1)
+targets_flat = targets.flatten()
+
+print("Flattened logits:", logits_flat.shape)
+print("Flattened targets:", targets_flat.shape)
+
+loss = torch.nn.functional.cross_entropy(logits_flat, targets_flat)
+print(loss)
+
+# Perplexity is a measure often used alongside cross entropy loss to evaluate the per- formance of models in tasks like language modeling. It can provide a more interpre- table way to understand the uncertainty of a model in predicting the next token in a sequence.
+# Perplexity measures how well the probability distribution predicted by the model matches the actual distribution of the words in the dataset. Similar to the loss, a lower perplexity indicates that the model predictions are closer to the actual distribution.
+# Perplexity is often considered more interpretable than the raw loss value because it sig- nifies the effective vocabulary size about which the model is uncertain at each step. In the given example, this would translate to the model being unsure about which among 48,725 tokens in the vocabulary to generate as the next token.
+
+#1. load a training dataset
+file_path = "the-verdict.txt"
+with open(file_path, "r", encoding="utf-8") as file:
+    text_data = file.read()
+
+#2. Check the number of characters and tokens in the dataset:
+total_characters = len(text_data)
+total_tokens = len(tokenizer.encode(text_data))
+print("Characters:", total_characters)
+print("Tokens:", total_tokens)
+
+# For the actual data loaders, we can set the max_length equal to the 256-token context length that the LLM supports so that the LLM sees longer texts during training
+train_ratio = 0.90
+split_idx = int(train_ratio * len(text_data))
+train_data = text_data[:split_idx]
+val_data = text_data[split_idx:]
+
+torch.manual_seed(123)
+
+train_loader = create_dataloader_v1(
+    train_data,
+    batch_size=2,
+    max_length=GPT_CONFIG_124M["context_length"],
+    stride=GPT_CONFIG_124M["context_length"],
+    drop_last=True,
+    shuffle=True,
+    num_workers=0
+)
+
+val_loader = create_dataloader_v1(
+    val_data,
+    batch_size=2,
+    max_length=GPT_CONFIG_124M["context_length"],
+    stride=GPT_CONFIG_124M["context_length"],
+    drop_last=False,
+    shuffle=False,
+    num_workers=0
+)
+
+# We used a relatively small batch size to reduce the computational resource demand because we were working with a very small dataset. In practice, training LLMs with batch sizes of 1,024 or larger is not uncommon.
+# we can iterate through the data loaders to ensure that they were created correctly:
+
+print("\nTraining set loader:")
+for x, y in train_loader:
+    print(x.shape, y.shape)
+
+print("\nValidation set loader:")
+for x, y in val_loader:
+    print(x.shape, y.shape)
+
+#  implement a utility function to calculate the cross entropy loss of a given batch returned via the training and validation loader:
+def calc_loss_batch(input_batch, target_batch, model, device): # The transfer to a given device allows us to transfer the data to a GPU.
+    input_batch = input_batch.to(device)
+    target_batch = target_batch.to(device)
+    logits = model(input_batch)
+    loss = torch.nn.functional.cross_entropy(
+        logits.flatten(0, 1), target_batch.flatten()
+        )
+    return loss
+
+# use this calc_loss_batch utility function, which computes the loss for a single batch, to implement the following calc_loss_loader function that computes the loss over all the batches sampled by a given data loader.
+
+# Function to compute the training and validation loss
+
+def calc_loss_loader(data_loader, model, device, num_batches=None):
+    total_loss = 0.
+    if len(data_loader) == 0:
+        return float("nan")
+    elif num_batches is None:
+        num_batches = len(data_loader) # Iterate over all batches if no fixed num_batches is specified
+    else:
+        num_batches = min(num_batches, len(data_loader))
+    for i, (input_batch, target_batch) in enumerate(data_loader): # Reduces the number of batches to match the total number of batchesinthedata loader if num_batches exceeds the number ofbatchesinthe data loader
+        if i < num_batches:
+            loss = calc_loss_batch(
+                input_batch, target_batch, model, device
+            )
+            total_loss += loss.item() # Sums loss for each batch
+        else:
+            break
+    return total_loss / num_batches # Averages the loss over all batches
+
+# calc_loss_loader function in action, applying it to the training and validation set loaders:
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model.to(device)
+with torch.no_grad():
+    train_loss = calc_loss_loader(train_loader, model, device)
+    val_loss = calc_loss_loader(val_loader, model, device)
+print("Training loss:", train_loss)
+print("Validation loss:", val_loss)
+
+#Note: At this point  loss values are relatively high because the model has not yet been trained.
+torch.manual_seed(123)
+model = GPTModel(GPT_CONFIG_124M)
+model.to(device)
+optimizer = torch.optim.AdamW(
+     model.parameters(), # The .parameters() method returns all trainable weight parameters of the model.
+    lr=0.0004, weight_decay=0.1
+)
+num_epochs = 10
+train_losses, val_losses, tokens_seen = train_model_simple(
+    model, train_loader, val_loader, optimizer, device,
+    num_epochs=num_epochs, eval_freq=5, eval_iter=5,
+    start_context="Every effort moves you", tokenizer=tokenizer
+)
+
+# Uncomment the following two lines to plot:
+# epochs_tensor = torch.linspace(0, num_epochs, len(train_losses))
+# plot_losses(epochs_tensor, tokens_seen, train_losses, val_losses)
+
+model.to("cpu")
+model.eval()
+
+# look at text generation strategies (also called decoding strategies) to generate more original text
+# plug the GPTModel instance (model) into the generate_text_simple func- tion, which uses the LLM to generate one token at a time:
+tokenizer = tiktoken.get_encoding("gpt2")
+
+token_ids = generate_text_simple(
+    model=model,
+    idx=text_to_token_ids("Every effort moves you", tokenizer),
+    max_new_tokens=25,
+    context_size=GPT_CONFIG_124M["context_length"]
+)
+print("Output text:\n", token_ids_to_text(token_ids, tokenizer))
+
+# Testing probabilistic sampling:
+# To illustrate the probabilistic sampling with a concrete example, let’s briefly dis- cuss the next-token generation process using a very small vocabulary for illustration purposes:
+vocab = {
+    "closer": 0,
+    "every": 1,
+    "effort": 2,
+    "forward": 3,
+    "inches": 4,
+    "moves": 5,
+    "pizza": 6,
+    "toward": 7,
+    "you": 8,
+}
+inverse_vocab = {v: k for k, v in vocab.items()}
+
+# assume the LLM is given the start context "every effort moves you" and generates the following next-token logits:
+next_token_logits = torch.tensor(
+    [4.51, 0.89, -1.90, 6.75, 1.63, -1.62, -1.89, 6.28, 1.79]
+)
+
+probas = torch.softmax(next_token_logits, dim=0)
+next_token_id = torch.argmax(probas).item()
+print(inverse_vocab[next_token_id])
+
+torch.manual_seed(123)
+next_token_id = torch.multinomial(probas, num_samples=1).item()
+print(inverse_vocab[next_token_id])
+
+print_sampled_tokens(probas)
+
+# Temperatures greater than 1 result in more uniformly distributed token probabilities, and temperatures smaller than 1 will result in more confident 
+# (sharper or more peaky) distributions. Let’s illustrate this by plotting the original probabilities alongside proba- bilities scaled with different temperature values:
+
+temperatures = [1, 0.1, 5]
+scaled_probas = [softmax_with_temperature(next_token_logits, T)
+                for T in temperatures]
+x = torch.arange(len(vocab))
+bar_width = 0.15
+fig, ax = plt.subplots(figsize=(5, 3))
+for i, T in enumerate(temperatures):
+    rects = ax.bar(x + i * bar_width, scaled_probas[i],
+                   bar_width, label=f'Temperature = {T}')
+ax.set_ylabel('Probability')
+ax.set_xticks(x)
+ax.set_xticklabels(vocab.keys(), rotation=90)
+ax.legend()
+
+# Uncomment to plot:
+#plt.tight_layout()
+#plt.show()
+# Original, lower, and higher confidence
+
+#Save the model's state
+torch.save(model.state_dict(), "model.pth")
+
+
+# Adaptive optimizers such as AdamW store additional parameters for each model weight. AdamW uses historical data to adjust learning rates for each model parameter dynamically. 
+# Without it, the optimizer resets, and the model may learn suboptimally or even fail to converge properly, which means it will lose the ability to generate coherent text. 
+# Using torch.save, we can save both the model and optimizer state_dict contents:
+torch.save({
+    "model_state_dict": model.state_dict(),
+    "optimizer_state_dict": optimizer.state_dict(),
+    },
+    "model_and_optimizer.pth"
+)
+
+# Restore from checkpoint
+checkpoint = torch.load("model_and_optimizer.pth", map_location=device) 
+model = GPTModel(GPT_CONFIG_124M) 
+model.load_state_dict(checkpoint["model_state_dict"])
+optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4, weight_decay=0.1) 
+optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+model.train()
+
+# Note: at this point you need tensorflow plus some salad: `pip install "tensorflow>=2.17.0"  "tqdm>=4.66"`
+# Executing this code downloads seven files associated with the 124M parameter GPT-2 model
+settings, params = download_and_load_gpt2(
+    model_size="124M", models_dir="gpt2"
+)
+
+
