@@ -19,9 +19,30 @@ from pathlib import Path
 
 from gpt_download import download_and_load_gpt2
 
-
 print(sys.executable)
 print(sys.path)
+
+# Calculating the classification accuracy
+def calc_accuracy_loader(data_loader, model, device, num_batches=None):
+    model.eval()
+    correct_predictions, num_examples = 0, 0
+    if num_batches is None:
+        num_batches = len(data_loader)
+    else:
+        num_batches = min(num_batches, len(data_loader))
+    for i, (input_batch, target_batch) in enumerate(data_loader):
+        if i < num_batches:
+            input_batch = input_batch.to(device)
+            target_batch = target_batch.to(device)
+            with torch.no_grad():
+                logits = model(input_batch)[:, -1, :]
+            predicted_labels = torch.argmax(logits, dim=-1)
+            num_examples += predicted_labels.shape[0]
+            correct_predictions += (
+                    (predicted_labels == target_batch).sum().item())
+        else: 
+            break
+    return correct_predictions / num_examples
 
 class SpamDataset(Dataset):
     def __init__(self, csv_file, tokenizer, max_length=None, pad_token_id=50256):
@@ -50,7 +71,7 @@ class SpamDataset(Dataset):
 
         # Handle NaN labels
         if pd.isna(label):
-            print(f"Warning: NaN label at index {index}.")
+            print(f"Warning: NaN label at index {index}. -> ",label)
             label = -1
 
         # Print label for debugging
@@ -1601,6 +1622,18 @@ def calc_loss_batch(input_batch, target_batch, model, device): # The transfer to
         )
     return loss
 
+# we use cross-entropy loss as a proxy to maximize accuracy.
+# we focus on optimizing only the last token, model(input_batch)[:, -1, :], rather than all tokens, model(input_batch):
+def calc_loss_batch_v2(input_batch, target_batch, model, device):
+    input_batch = input_batch.to(device)
+    target_batch = target_batch.to(device)
+    logits = model(input_batch)[:, -1, :]
+    loss = torch.nn.functional.cross_entropy(
+        logits, 
+        target_batch
+        )
+    return loss
+
 # use this calc_loss_batch utility function, which computes the loss for a single batch, to implement the following calc_loss_loader function that computes the loss over all the batches sampled by a given data loader.
 
 # Function to compute the training and validation loss
@@ -1622,6 +1655,25 @@ def calc_loss_loader(data_loader, model, device, num_batches=None):
         else:
             break
     return total_loss / num_batches # Averages the loss over all batches
+
+# Calculating the classification loss (v2, for spam classification 1/0)
+def calc_loss_loader_v2(data_loader, model, device, num_batches=None):
+    total_loss = 0.
+    if len(data_loader) == 0:
+        return float("nan")
+    elif num_batches is None:
+        num_batches = len(data_loader)
+    else:
+        num_batches = min(num_batches, len(data_loader)) # Ensures number of batches doesn’t exceed batches in data loader
+    for i, (input_batch, target_batch) in enumerate(data_loader):
+        if i < num_batches:
+            loss = calc_loss_batch_v2(
+                input_batch, target_batch, model, device
+                )
+            total_loss += loss.item()
+        else:
+            break
+    return total_loss / num_batches
 
 # calc_loss_loader function in action, applying it to the training and validation set loaders:
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -1793,7 +1845,9 @@ print("Output text:\n", token_ids_to_text(token_ids, tokenizer))
 
 # import pandas as pd
 extracted_path = "./sms_spam_collection"
+
 data_file_path = Path(extracted_path) / "SMSSpamCollection.tsv"
+
 df = pd.read_csv(
     data_file_path, sep="\t", header=None, names=["Label", "Text"]
 )
@@ -1823,7 +1877,6 @@ test_df.to_csv("test.csv", index=None)
 tokenizer = tiktoken.get_encoding("gpt2") 
 print(tokenizer.encode("<|endoftext|>", allowed_special={"<|endoftext|>"}))
 
-
 # We first need to implement a PyTorch Dataset, which specifies how the data is loaded and processed before we can instantiate the data loaders. 
 # For this purpose, we define the SpamDataset class, which implements the concepts in figure 6.6.
 # This SpamDataset class handles several key tasks: it identifies the longest sequence in the training dataset, encodes the text messages, and ensures 
@@ -1847,6 +1900,8 @@ test_dataset = SpamDataset(
     max_length=train_dataset.max_length,
     tokenizer=tokenizer
 )
+
+# this needs: from torch.utils.data import DataLoader
 
 num_workers = 0
 batch_size = 8
@@ -1933,7 +1988,7 @@ text_2 = (
             "Is the following text 'spam'? Answer with 'yes' or 'no':"
             " 'You are a winner you have been specially"
             " selected to receive $1000 cash or a $2000 award.'"
-            )
+    )
 
 token_ids = generate_text_simple(
     model=model,
@@ -1942,6 +1997,7 @@ token_ids = generate_text_simple(
     context_size=BASE_CONFIG["context_length"]
     )
 
+#
 print(token_ids_to_text(token_ids, tokenizer))
 
 # A recap: print the model architecture via 
@@ -1958,7 +2014,9 @@ for param in model.parameters():
 
 # Adding a classification layer:
 torch.manual_seed(123)
+
 num_classes = 2
+
 model.out_head = torch.nn.Linear(
     in_features=BASE_CONFIG["emb_dim"],
     out_features=num_classes
@@ -1972,4 +2030,56 @@ for param in model.trf_blocks[-1].parameters():
 for param in model.final_norm.parameters():
     param.requires_grad = True
 
+inputs = tokenizer.encode("Do you have time")
+inputs = torch.tensor(inputs).unsqueeze(0)
+print("Inputs:", inputs)
+print("Inputs dimensions:", inputs.shape)
 
+with torch.no_grad():
+    outputs = model(inputs)
+print("Outputs:\n", outputs)
+print("Outputs dimensions:", outputs.shape)
+
+# To extract the last output token from the output tensor, we use the following code:
+print("Last output token:", outputs[:, -1, :])
+
+#Note: We still need to convert the values into a class-label prediction.
+# We can obtain the class label like this:
+probas = torch.softmax(outputs[:, -1, :], dim=-1)
+label = torch.argmax(probas)
+print("Class label:", label.item())
+
+logits = outputs[:, -1, :]
+label = torch.argmax(logits)
+print("Class label:", label.item())
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # model automatically runs on a GPU if a GPU with Nvidia CUDA support is available and otherwise runs on a CPU
+model.to(device)
+torch.manual_seed(123)
+
+train_accuracy = calc_accuracy_loader(
+    train_loader, model, device, num_batches=10
+)
+
+val_accuracy = calc_accuracy_loader(
+    val_loader, model, device, num_batches=10
+)
+
+test_accuracy = calc_accuracy_loader(
+    test_loader, model, device, num_batches=10
+)
+
+print(f"Training accuracy: {train_accuracy*100:.2f}%")
+print(f"Validation accuracy: {val_accuracy*100:.2f}%")
+print(f"Test accuracy: {test_accuracy*100:.2f}%")
+
+with torch.no_grad():
+    train_loss = calc_loss_loader_v2(
+        train_loader, model, device, num_batches=5
+    ) # Disables gradient tracking for efficiency because we are not training yet
+    val_loss = calc_loss_loader_v2(val_loader, model, device, num_batches=5)
+    test_loss = calc_loss_loader_v2(test_loader, model, device, num_batches=5)
+
+print(f"Training loss: {train_loss:.3f}")
+print(f"Validation loss: {val_loss:.3f}")
+print(f"Test loss: {test_loss:.3f}")
