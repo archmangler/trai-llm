@@ -23,49 +23,50 @@ from gpt_download import download_and_load_gpt2
 print(sys.executable)
 print(sys.path)
 
-
 class SpamDataset(Dataset):
-    def __init__(self, csv_file, tokenizer, max_length=None,
-                 pad_token_id=50256):
+    def __init__(self, csv_file, tokenizer, max_length=None, pad_token_id=50256):
         self.data = pd.read_csv(csv_file)
-        self.encoded_texts = [ # Pretokenizes texts
+
+        self.encoded_texts = [ # Pretokenizes text
             tokenizer.encode(text) for text in self.data["Text"]
-            ]
+        ]
+
+        # Determine max_length, either provided or find the longest sequence
         if max_length is None:
             self.max_length = self._longest_encoded_length()
         else:
-            self.max_length = max_length # Truncates sequences if they are longer than max_length
-            self.encoded_texts = [
-                encoded_text[:self.max_length]
-                for encoded_text in self.encoded_texts
-                ] # Pads sequences to the longest sequence
-            self.encoded_texts = [
-                encoded_text + [pad_token_id] * (self.max_length - len(encoded_text))
-                for encoded_text in self.encoded_texts
-            ]
+            self.max_length = max_length
+        
+        # Apply truncation and padding
+        self.encoded_texts = [
+            # Truncate
+            encoded_text[:self.max_length] + [pad_token_id] * (self.max_length - len(encoded_text))
+            for encoded_text in self.encoded_texts
+        ]
+
     def __getitem__(self, index):
-        # ... existing code ...
-        
-        # Get the text and label from the dataframe
-        text = self.data.iloc[index]['text']
-        label = self.data.iloc[index]['label']
-        
-        # Encode the text
-        encoded = self.tokenizer.encode(text)
-        
-        # Pad or truncate the encoded sequence if max_length is specified
-        if self.max_length is not None:
-            if len(encoded) > self.max_length:
-                encoded = encoded[:self.max_length]
-            else:
-                # Pad with pad_token_id
-                encoded.extend([self.pad_token_id] * (self.max_length - len(encoded)))
-        
-        # Convert to tensors and ensure they're properly shaped
+        encoded = self.encoded_texts[index]
+        label = self.data.iloc[index]["Label"]
+
+        # Handle NaN labels
+        if pd.isna(label):
+            print(f"Warning: NaN label at index {index}.")
+            label = -1
+
+        # Print label for debugging
+        print(f"[DEBUG] Index: {index}, Raw Label: {label}, Type: {type(label)}")
+
+        # Ensure label is an integer
+        if isinstance(label, (int, float)):
+            label = int(label)
+        else:
+            raise ValueError(f"Label at index {index} is not a valid integer: {label}")
+
         return (
             torch.tensor(encoded, dtype=torch.long),
-            torch.tensor([label], dtype=torch.long)  # Wrap label in list to make it a 1D tensor
+            torch.tensor(label, dtype=torch.long)
         )
+    
     def __len__(self):
         return len(self.data)
     
@@ -75,7 +76,58 @@ class SpamDataset(Dataset):
             encoded_length = len(encoded_text)
             if encoded_length > max_length:
                 max_length = encoded_length
-                return max_length
+        return max_length  # Fixed indentation to ensure it returns correctly
+
+#class SpamDataset(Dataset):
+#    def __init__(self, csv_file, tokenizer, max_length=None,
+#                 pad_token_id=50256):
+#        self.data = pd.read_csv(csv_file)
+#        self.encoded_texts = [ # Pretokenizes texts
+#            tokenizer.encode(text) for text in self.data["Text"]
+#            ]
+#        if max_length is None:
+#            self.max_length = self._longest_encoded_length()
+#        else:
+#            self.max_length = max_length # Truncates sequences if they are longer than max_length
+#            self.encoded_texts = [
+#                encoded_text[:self.max_length]
+#                for encoded_text in self.encoded_texts
+#            ] # Pads sequences to the longest sequence
+#            self.encoded_texts = [
+#                encoded_text + [pad_token_id] * (self.max_length - len(encoded_text))
+#                for encoded_text in self.encoded_texts
+#            ]
+#    def __getitem__(self, index):
+#        encoded = self.encoded_texts[index]
+#        label = self.data.iloc[index]["Label"]
+#        # Check for NaN and handle appropriately
+#        if pd.isna(label):
+#            print(f"Warning: NaN label at index {index}.")
+#        # You can choose to either skip this instance or set a default label
+#        # For example, set a default label like -1 or some other value
+#        label = -1
+#        # Print label for debugging
+#        print(f"[DEBUG] Index: {index}, Raw Label: {label}, Type: {type(label)}")
+#        # Ensure label is an integer
+#        if isinstance(label, (int, float)):
+#            label = int(label)
+#        else:
+#            raise ValueError(f"Label at index {index} is not a valid integer: {label}")
+#        return (
+#            torch.tensor(encoded, dtype=torch.long),
+#            torch.tensor(label, dtype=torch.long)
+#            )
+#    
+#    def __len__(self):
+#        return len(self.data)
+#    
+#    def _longest_encoded_length(self):
+#        max_length = 0
+#        for encoded_text in self.encoded_texts:
+#            encoded_length = len(encoded_text)
+#            if encoded_length > max_length:
+#                max_length = encoded_length
+#                return max_length
 
 def random_split(df, train_frac, validation_frac):
     df = df.sample(
@@ -1822,8 +1874,9 @@ test_loader = DataLoader(
     drop_last=False,
 )
 
-# iterate over the training loader and then print the tensor dimen- sions of the last batch:
+# iterate over the training loader and then print the tensor dimensions of the last batch:
 for input_batch, target_batch in train_loader:
+    print("looping through batch ...\n")
     pass
 
 print("Input batch dimensions:", input_batch.shape)
@@ -1839,25 +1892,23 @@ CHOOSE_MODEL = "gpt2-small (124M)"
 INPUT_PROMPT = "Every effort moves"
 
 BASE_CONFIG = {
-
     "vocab_size": 50257, # Vocabulary size
     "context_length": 1024, # Contextlength
     "drop_rate": 0.0, # Dropout rate
     "qkv_bias": True # Query-key-value bias
-
 }
 
 model_configs = {
-
     "gpt2-small (124M)": {"emb_dim": 768, "n_layers": 12, "n_heads": 12},
     "gpt2-medium (355M)": {"emb_dim": 1024, "n_layers": 24, "n_heads": 16},
     "gpt2-large (774M)": {"emb_dim": 1280, "n_layers": 36, "n_heads": 20},
     "gpt2-xl (1558M)": {"emb_dim": 1600, "n_layers": 48, "n_heads": 25},
-
 }
 
 BASE_CONFIG.update(model_configs[CHOOSE_MODEL])
+
 model_size = CHOOSE_MODEL.split(" ")[-1].lstrip("(").rstrip(")")
+
 settings, params = download_and_load_gpt2(
     model_size=model_size, models_dir="gpt2"
 )
@@ -1865,3 +1916,60 @@ settings, params = download_and_load_gpt2(
 model = GPTModel(BASE_CONFIG)
 load_weights_into_gpt(model, params)
 model.eval()
+
+text_1 = "Every effort moves you"
+token_ids = generate_text_simple(
+    model=model,
+    idx=text_to_token_ids(text_1, tokenizer),
+    max_new_tokens=15,
+    context_size=BASE_CONFIG["context_length"]
+)
+
+print("Testing current results: \n")
+print(token_ids_to_text(token_ids, tokenizer))
+print("\n")
+
+text_2 = (
+            "Is the following text 'spam'? Answer with 'yes' or 'no':"
+            " 'You are a winner you have been specially"
+            " selected to receive $1000 cash or a $2000 award.'"
+            )
+
+token_ids = generate_text_simple(
+    model=model,
+    idx=text_to_token_ids(text_2, tokenizer),
+    max_new_tokens=23,
+    context_size=BASE_CONFIG["context_length"]
+    )
+
+print(token_ids_to_text(token_ids, tokenizer))
+
+# A recap: print the model architecture via 
+print("This is the current model architecture: ", model)
+
+# NOTES: In neural network-based language models, the lower layers generally capture basic lan- guage structures and semantics applicable across a wide range of tasks and datasets. 
+# So, fine-tuning only the last layers (i.e., layers near the output), which are more specific to nuanced linguistic patterns and task-specific features, is often sufficient to adapt
+# the model to new tasks. A nice side effect is that it is computationally more efficient to fine- tune only a small number of layers. 
+
+# To get the model ready for classification fine-tuning, 
+# we first freeze the model, meaning that we make all layers nontrainable:
+for param in model.parameters():
+    param.requires_grad = False
+
+# Adding a classification layer:
+torch.manual_seed(123)
+num_classes = 2
+model.out_head = torch.nn.Linear(
+    in_features=BASE_CONFIG["emb_dim"],
+    out_features=num_classes
+)
+
+# This new model.out_head output layer has its requires_grad attribute set to True by default, which means that it’s the only layer in the model that will be updated during training. 
+# Technically, training the output layer we just added is sufficient. However, fine-tuning additional layers can noticeably improve the predictive performance of the model.
+for param in model.trf_blocks[-1].parameters():
+    param.requires_grad = True
+
+for param in model.final_norm.parameters():
+    param.requires_grad = True
+
+
