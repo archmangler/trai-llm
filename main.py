@@ -13,10 +13,69 @@ from gpt_download import download_and_load_gpt2
 import numpy as np
 import pandas as pd
 import os
+from torch.utils.data import Dataset
+from torch.utils.data import DataLoader
 from pathlib import Path
+
+from gpt_download import download_and_load_gpt2
+
 
 print(sys.executable)
 print(sys.path)
+
+
+class SpamDataset(Dataset):
+    def __init__(self, csv_file, tokenizer, max_length=None,
+                 pad_token_id=50256):
+        self.data = pd.read_csv(csv_file)
+        self.encoded_texts = [ # Pretokenizes texts
+            tokenizer.encode(text) for text in self.data["Text"]
+            ]
+        if max_length is None:
+            self.max_length = self._longest_encoded_length()
+        else:
+            self.max_length = max_length # Truncates sequences if they are longer than max_length
+            self.encoded_texts = [
+                encoded_text[:self.max_length]
+                for encoded_text in self.encoded_texts
+                ] # Pads sequences to the longest sequence
+            self.encoded_texts = [
+                encoded_text + [pad_token_id] * (self.max_length - len(encoded_text))
+                for encoded_text in self.encoded_texts
+            ]
+    def __getitem__(self, index):
+        # ... existing code ...
+        
+        # Get the text and label from the dataframe
+        text = self.data.iloc[index]['text']
+        label = self.data.iloc[index]['label']
+        
+        # Encode the text
+        encoded = self.tokenizer.encode(text)
+        
+        # Pad or truncate the encoded sequence if max_length is specified
+        if self.max_length is not None:
+            if len(encoded) > self.max_length:
+                encoded = encoded[:self.max_length]
+            else:
+                # Pad with pad_token_id
+                encoded.extend([self.pad_token_id] * (self.max_length - len(encoded)))
+        
+        # Convert to tensors and ensure they're properly shaped
+        return (
+            torch.tensor(encoded, dtype=torch.long),
+            torch.tensor([label], dtype=torch.long)  # Wrap label in list to make it a 1D tensor
+        )
+    def __len__(self):
+        return len(self.data)
+    
+    def _longest_encoded_length(self):
+        max_length = 0
+        for encoded_text in self.encoded_texts:
+            encoded_length = len(encoded_text)
+            if encoded_length > max_length:
+                max_length = encoded_length
+                return max_length
 
 def random_split(df, train_frac, validation_frac):
     df = df.sample(
@@ -1350,7 +1409,7 @@ token_ids = generate_text_simple(
 
 print("Output text:\n", token_ids_to_text(token_ids, tokenizer))
 
-# To define what makes text “coherent” or “high quality,” we have to imple- ment a numerical method to evaluate the generated content.
+# To define what makes text "coherent" or "high quality," we have to imple- ment a numerical method to evaluate the generated content.
 # calculate a loss metric for the generated outputs. This loss serves as a progress and success indicator of the training progress. 
 # review additional methodologies for assess- ing model quality.
 
@@ -1392,8 +1451,8 @@ print("Text 2:", target_probas_2)
 # How do we maximize the softmax probability values corresponding to the target tokens? 
 # The big picture is that we update the model weights so that the model outputs higher values for the respective token IDs we want to generate. 
 # The weight update is done via a process called backpropagation, a standard technique for training deep neural networks (see sections A.3 to A.7 in appendix A for more details about back- propagation and model training).
-# Backpropagation requires a loss function, which calculates the difference between the model’s predicted output (here, the probabilities corresponding to the target token IDs) and the actual desired output. 
-# This loss function measures how far off the model’s predictions are from the target values.
+# Backpropagation requires a loss function, which calculates the difference between the model's predicted output (here, the probabilities corresponding to the target token IDs) and the actual desired output. 
+# This loss function measures how far off the model's predictions are from the target values.
 
 
 # Calculating the loss involves several steps. Steps 1 to 3, which we have already completed, calculate the token probabilities corresponding to the target tensors. These probabilities are then transformed via a logarithm and averaged in steps 4 to 6.
@@ -1413,7 +1472,7 @@ print("Log probabilities: ", log_probas)
 avg_log_probas = torch.mean(log_probas)
 print("Average of the log probability scores: ", avg_log_probas)
 
-# Before we apply the cross_entropy function, let’s briefly recall the shape of the logits and target tensors:
+# Before we apply the cross_entropy function, let's briefly recall the shape of the logits and target tensors:
 print("Logits shape:", logits.shape)
 print("Targets shape:", targets.shape)
 
@@ -1556,7 +1615,7 @@ token_ids = generate_text_simple(
 print("Output text:\n", token_ids_to_text(token_ids, tokenizer))
 
 # Testing probabilistic sampling:
-# To illustrate the probabilistic sampling with a concrete example, let’s briefly dis- cuss the next-token generation process using a very small vocabulary for illustration purposes:
+# To illustrate the probabilistic sampling with a concrete example, let's briefly dis- cuss the next-token generation process using a very small vocabulary for illustration purposes:
 vocab = {
     "closer": 0,
     "every": 1,
@@ -1586,7 +1645,7 @@ print(inverse_vocab[next_token_id])
 print_sampled_tokens(probas)
 
 # Temperatures greater than 1 result in more uniformly distributed token probabilities, and temperatures smaller than 1 will result in more confident 
-# (sharper or more peaky) distributions. Let’s illustrate this by plotting the original probabilities alongside proba- bilities scaled with different temperature values:
+# (sharper or more peaky) distributions. Let's illustrate this by plotting the original probabilities alongside proba- bilities scaled with different temperature values:
 
 temperatures = [1, 0.1, 5]
 scaled_probas = [softmax_with_temperature(next_token_logits, T)
@@ -1653,8 +1712,8 @@ NEW_CONFIG.update(model_configs[model_name])
 # the origi- nal GPT-2 models from OpenAI were trained with a 1,024-token length, so we have to update the NEW_CONFIG accordingly:
 NEW_CONFIG.update({"context_length": 1024})
 
-# OpenAI used bias vectors in the multi-head attention module’s linear layers to implement the query, key, and value matrix computations. 
-# Bias vectors are not com- monly used in LLMs anymore as they don’t improve the modeling performance and are thus unnecessary. 
+# OpenAI used bias vectors in the multi-head attention module's linear layers to implement the query, key, and value matrix computations. 
+# Bias vectors are not com- monly used in LLMs anymore as they don't improve the modeling performance and are thus unnecessary. 
 # However, since we are working with pretrained weights, we need to match the settings for consistency and enable these bias vectors:
 NEW_CONFIG.update({"qkv_bias": True})
 
@@ -1662,7 +1721,7 @@ gpt = GPTModel(NEW_CONFIG)
 gpt.eval()
 
 # By default, the GPTModel instance is initialized with random weights for pretraining. 
-# The last step to using OpenAI’s model weights is to override these random weights with those customised for our use-case
+# The last step to using OpenAI's model weights is to override these random weights with those customised for our use-case
 
 load_weights_into_gpt(gpt, params)
 gpt.to(device)
@@ -1692,7 +1751,7 @@ print(df)
 # 1) Creating a balanced dataset from the provided dataset source:
 balanced_df = create_balanced_dataset(df)
 print(balanced_df["Label"].value_counts())
-# 2) convert the “string” class labels "ham" and "spam" into integer class labels 0 and 1, respectively:
+# 2) convert the "string" class labels "ham" and "spam" into integer class labels 0 and 1, respectively:
 balanced_df["Label"] = balanced_df["Label"].map({"ham": 0, "spam": 1})
 
 # 3)  instead of using the GPT vocabulary, which consists of more than 50,000 words, we are dealing with just two token IDs: 0 and 1.
@@ -1702,8 +1761,107 @@ balanced_df["Label"] = balanced_df["Label"].map({"ham": 0, "spam": 1})
 train_df, validation_df, test_df = random_split(
     balanced_df, 0.7, 0.1)
 
+# save the dataset as CSV (comma-separated value) files so we can reuse it later:
+
+train_df.to_csv("train.csv", index=None)
+validation_df.to_csv("validation.csv", index=None)
+test_df.to_csv("test.csv", index=None)
+
 #  using the GPT-2 tokenizer from the tiktoken package
 tokenizer = tiktoken.get_encoding("gpt2") 
 print(tokenizer.encode("<|endoftext|>", allowed_special={"<|endoftext|>"}))
 
 
+# We first need to implement a PyTorch Dataset, which specifies how the data is loaded and processed before we can instantiate the data loaders. 
+# For this purpose, we define the SpamDataset class, which implements the concepts in figure 6.6.
+# This SpamDataset class handles several key tasks: it identifies the longest sequence in the training dataset, encodes the text messages, and ensures 
+# that all other sequences are padded with a padding token to match the length of the longest sequence.
+train_dataset = SpamDataset(
+    csv_file="train.csv",
+    max_length=None,
+    tokenizer=tokenizer
+)
+
+print("Number of tokens in the longest spam data sequence: ", train_dataset.max_length)
+
+val_dataset = SpamDataset(
+    csv_file="validation.csv",
+    max_length=train_dataset.max_length,
+    tokenizer=tokenizer
+)
+
+test_dataset = SpamDataset(
+    csv_file="test.csv",
+    max_length=train_dataset.max_length,
+    tokenizer=tokenizer
+)
+
+num_workers = 0
+batch_size = 8
+torch.manual_seed(123)
+
+train_loader = DataLoader(
+    dataset=train_dataset,
+    batch_size=batch_size,
+    shuffle=True,
+    num_workers=num_workers,
+    drop_last=True,
+)
+
+val_loader = DataLoader(
+    dataset=val_dataset,
+    batch_size=batch_size,
+    num_workers=num_workers,
+    drop_last=False,
+)
+
+test_loader = DataLoader(
+    dataset=test_dataset,
+    batch_size=batch_size,
+    num_workers=num_workers,
+    drop_last=False,
+)
+
+# iterate over the training loader and then print the tensor dimen- sions of the last batch:
+for input_batch, target_batch in train_loader:
+    pass
+
+print("Input batch dimensions:", input_batch.shape)
+print("Label batch dimensions", target_batch.shape)
+
+print(f"{len(train_loader)} training batches")
+print(f"{len(val_loader)} validation batches")
+print(f"{len(test_loader)} test batches")
+
+# Recap: We've prepared the data, we need to prepare the model for fine-tuning. This means: initialise the model with pre-trained weights.
+
+CHOOSE_MODEL = "gpt2-small (124M)"
+INPUT_PROMPT = "Every effort moves"
+
+BASE_CONFIG = {
+
+    "vocab_size": 50257, # Vocabulary size
+    "context_length": 1024, # Contextlength
+    "drop_rate": 0.0, # Dropout rate
+    "qkv_bias": True # Query-key-value bias
+
+}
+
+model_configs = {
+
+    "gpt2-small (124M)": {"emb_dim": 768, "n_layers": 12, "n_heads": 12},
+    "gpt2-medium (355M)": {"emb_dim": 1024, "n_layers": 24, "n_heads": 16},
+    "gpt2-large (774M)": {"emb_dim": 1280, "n_layers": 36, "n_heads": 20},
+    "gpt2-xl (1558M)": {"emb_dim": 1600, "n_layers": 48, "n_heads": 25},
+
+}
+
+BASE_CONFIG.update(model_configs[CHOOSE_MODEL])
+model_size = CHOOSE_MODEL.split(" ")[-1].lstrip("(").rstrip(")")
+settings, params = download_and_load_gpt2(
+    model_size=model_size, models_dir="gpt2"
+)
+
+model = GPTModel(BASE_CONFIG)
+load_weights_into_gpt(model, params)
+model.eval()
