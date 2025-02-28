@@ -15,9 +15,33 @@ import pandas as pd
 import os
 from pathlib import Path
 
-
 print(sys.executable)
 print(sys.path)
+
+def random_split(df, train_frac, validation_frac):
+    df = df.sample(
+        frac=1, random_state=123
+    ).reset_index(drop=True)
+    train_end = int(len(df) * train_frac)
+    validation_end = train_end + int(len(df) * validation_frac)
+    train_df = df[:train_end]
+    validation_df = df[train_end:validation_end]
+    test_df = df[validation_end:]
+    return train_df, validation_df, test_df
+
+# train_df, validation_df, test_df = random_split(
+#     balanced_df, 0.7, 0.1)
+
+# to undersample and create a balanced dataset.
+def create_balanced_dataset(df):
+    num_spam = df[df["Label"] == "spam"].shape[0]
+    ham_subset = df[df["Label"] == "ham"].sample(
+        num_spam, random_state=123
+    )
+    balanced_df = pd.concat([
+        ham_subset, df[df["Label"] == "spam"]
+    ])
+    return balanced_df
 
 def load_weights_into_gpt(gpt, params):
     gpt.pos_emb.weight = assign(gpt.pos_emb.weight, params['wpe'])
@@ -1233,6 +1257,35 @@ def generate_text_simple(model, idx, max_new_tokens, context_size): #idx is a (b
             idx = torch.cat((idx, idx_next), dim=1)
     return idx
 
+def generate(model, idx, max_new_tokens, context_size, temperature=0.0, top_k=None, eos_id=None):
+    # For-loop is the same as before: Get logits, and only focus on last time step
+    for _ in range(max_new_tokens):
+        idx_cond = idx[:, -context_size:]
+        with torch.no_grad():
+            logits = model(idx_cond)
+        logits = logits[:, -1, :]
+        # New: Filter logits with top_k sampling
+        if top_k is not None:
+            # Keep only top_k values
+            top_logits, _ = torch.topk(logits, top_k)
+            min_val = top_logits[:, -1]
+            logits = torch.where(logits < min_val, torch.tensor(float('-inf')).to(logits.device), logits)
+        # New: Apply temperature scaling
+        if temperature > 0.0:
+            logits = logits / temperature
+            # Apply softmax to get probabilities
+            probs = torch.softmax(logits, dim=-1)  # (batch_size, context_len)
+            # Sample from the distribution
+            idx_next = torch.multinomial(probs, num_samples=1)  # (batch_size, 1)
+        # Otherwise same as before: get idx of the vocab entry with the highest logits value
+        else:
+            idx_next = torch.argmax(logits, dim=-1, keepdim=True)  # (batch_size, 1)
+
+        if idx_next == eos_id:  # Stop generating early if end-of-sequence token is encountered and eos_id is specified
+            break
+        # Same as before: append sampled index to the running sequence
+        idx = torch.cat((idx, idx_next), dim=1)  # (batch_size, num_tokens+1)
+    return idx
 
 # Test text generation output: encode the input context into token IDs:
 start_context = "Hello, I am"
@@ -1633,4 +1686,24 @@ data_file_path = Path(extracted_path) / "SMSSpamCollection.tsv"
 df = pd.read_csv(
     data_file_path, sep="\t", header=None, names=["Label", "Text"]
 )
+
 print(df)
+
+# 1) Creating a balanced dataset from the provided dataset source:
+balanced_df = create_balanced_dataset(df)
+print(balanced_df["Label"].value_counts())
+# 2) convert the “string” class labels "ham" and "spam" into integer class labels 0 and 1, respectively:
+balanced_df["Label"] = balanced_df["Label"].map({"ham": 0, "spam": 1})
+
+# 3)  instead of using the GPT vocabulary, which consists of more than 50,000 words, we are dealing with just two token IDs: 0 and 1.
+balanced_df["Label"] = balanced_df["Label"].map({"ham": 0, "spam": 1})
+
+#  4) create a random_split function to split the dataset into three parts: 70% for training, 10% for validation, and 20% for testing. (These ratios are common in machine learning to train, adjust, and evaluate models.)
+train_df, validation_df, test_df = random_split(
+    balanced_df, 0.7, 0.1)
+
+#  using the GPT-2 tokenizer from the tiktoken package
+tokenizer = tiktoken.get_encoding("gpt2") 
+print(tokenizer.encode("<|endoftext|>", allowed_special={"<|endoftext|>"}))
+
+
