@@ -44,50 +44,44 @@ def calc_accuracy_loader(data_loader, model, device, num_batches=None):
             break
     return correct_predictions / num_examples
 
+# 
+
+
+# Problematic Class
 class SpamDataset(Dataset):
     def __init__(self, csv_file, tokenizer, max_length=None, pad_token_id=50256):
         self.data = pd.read_csv(csv_file)
 
-        self.encoded_texts = [ # Pretokenizes text
+        # Tokenize
+        self.encoded_texts = [
             tokenizer.encode(text) for text in self.data["Text"]
         ]
 
-        # Determine max_length, either provided or find the longest sequence
         if max_length is None:
             self.max_length = self._longest_encoded_length()
         else:
             self.max_length = max_length
-        
-        # Apply truncation and padding
+            # Truncate any sentence longer than `max_length`
+            self.encoded_texts = [
+                encoded_text[:self.max_length]
+                for encoded_text in self.encoded_texts
+            ]
+
+        # Pad
         self.encoded_texts = [
-            # Truncate
-            encoded_text[:self.max_length] + [pad_token_id] * (self.max_length - len(encoded_text))
+            encoded_text + [pad_token_id] *
+            (self.max_length - len(encoded_text))
             for encoded_text in self.encoded_texts
         ]
 
     def __getitem__(self, index):
         encoded = self.encoded_texts[index]
         label = self.data.iloc[index]["Label"]
-
-        # Handle NaN labels
-        if pd.isna(label):
-            print(f"Warning: NaN label at index {index}. -> ",label)
-            label = -1
-
-        # Print label for debugging
-        print(f"[DEBUG] Index: {index}, Raw Label: {label}, Type: {type(label)}")
-
-        # Ensure label is an integer
-        if isinstance(label, (int, float)):
-            label = int(label)
-        else:
-            raise ValueError(f"Label at index {index} is not a valid integer: {label}")
-
         return (
             torch.tensor(encoded, dtype=torch.long),
             torch.tensor(label, dtype=torch.long)
         )
-    
+
     def __len__(self):
         return len(self.data)
     
@@ -97,58 +91,9 @@ class SpamDataset(Dataset):
             encoded_length = len(encoded_text)
             if encoded_length > max_length:
                 max_length = encoded_length
-        return max_length  # Fixed indentation to ensure it returns correctly
-
-#class SpamDataset(Dataset):
-#    def __init__(self, csv_file, tokenizer, max_length=None,
-#                 pad_token_id=50256):
-#        self.data = pd.read_csv(csv_file)
-#        self.encoded_texts = [ # Pretokenizes texts
-#            tokenizer.encode(text) for text in self.data["Text"]
-#            ]
-#        if max_length is None:
-#            self.max_length = self._longest_encoded_length()
-#        else:
-#            self.max_length = max_length # Truncates sequences if they are longer than max_length
-#            self.encoded_texts = [
-#                encoded_text[:self.max_length]
-#                for encoded_text in self.encoded_texts
-#            ] # Pads sequences to the longest sequence
-#            self.encoded_texts = [
-#                encoded_text + [pad_token_id] * (self.max_length - len(encoded_text))
-#                for encoded_text in self.encoded_texts
-#            ]
-#    def __getitem__(self, index):
-#        encoded = self.encoded_texts[index]
-#        label = self.data.iloc[index]["Label"]
-#        # Check for NaN and handle appropriately
-#        if pd.isna(label):
-#            print(f"Warning: NaN label at index {index}.")
-#        # You can choose to either skip this instance or set a default label
-#        # For example, set a default label like -1 or some other value
-#        label = -1
-#        # Print label for debugging
-#        print(f"[DEBUG] Index: {index}, Raw Label: {label}, Type: {type(label)}")
-#        # Ensure label is an integer
-#        if isinstance(label, (int, float)):
-#            label = int(label)
-#        else:
-#            raise ValueError(f"Label at index {index} is not a valid integer: {label}")
-#        return (
-#            torch.tensor(encoded, dtype=torch.long),
-#            torch.tensor(label, dtype=torch.long)
-#            )
-#    
-#    def __len__(self):
-#        return len(self.data)
-#    
-#    def _longest_encoded_length(self):
-#        max_length = 0
-#        for encoded_text in self.encoded_texts:
-#            encoded_length = len(encoded_text)
-#            if encoded_length > max_length:
-#                max_length = encoded_length
-#                return max_length
+        return max_length
+    
+# /Problematic Class
 
 def random_split(df, train_frac, validation_frac):
     df = df.sample(
@@ -1664,7 +1609,7 @@ def calc_loss_loader_v2(data_loader, model, device, num_batches=None):
     elif num_batches is None:
         num_batches = len(data_loader)
     else:
-        num_batches = min(num_batches, len(data_loader)) # Ensures number of batches doesn’t exceed batches in data loader
+        num_batches = min(num_batches, len(data_loader)) # Ensures number of batches doesn't exceed batches in data loader
     for i, (input_batch, target_batch) in enumerate(data_loader):
         if i < num_batches:
             loss = calc_loss_batch_v2(
@@ -1840,6 +1785,7 @@ token_ids = generate(
     temperature=1.5
 )
 
+
 # If the model is loaded correctly, we can now use it to generate new text using our previous generate function:
 print("Output text:\n", token_ids_to_text(token_ids, tokenizer))
 
@@ -1887,8 +1833,6 @@ train_dataset = SpamDataset(
     tokenizer=tokenizer
 )
 
-print("Number of tokens in the longest spam data sequence: ", train_dataset.max_length)
-
 val_dataset = SpamDataset(
     csv_file="validation.csv",
     max_length=train_dataset.max_length,
@@ -1901,7 +1845,8 @@ test_dataset = SpamDataset(
     tokenizer=tokenizer
 )
 
-# this needs: from torch.utils.data import DataLoader
+
+print("Number of tokens in the longest spam data sequence: ", train_dataset.max_length)
 
 num_workers = 0
 batch_size = 8
@@ -1929,28 +1874,11 @@ test_loader = DataLoader(
     drop_last=False,
 )
 
-# iterate over the training loader and then print the tensor dimensions of the last batch:
-for input_batch, target_batch in train_loader:
-    print("looping through batch ...\n")
-    pass
-
-print("Input batch dimensions:", input_batch.shape)
-print("Label batch dimensions", target_batch.shape)
-
-print(f"{len(train_loader)} training batches")
-print(f"{len(val_loader)} validation batches")
-print(f"{len(test_loader)} test batches")
-
-# Recap: We've prepared the data, we need to prepare the model for fine-tuning. This means: initialise the model with pre-trained weights.
-
-CHOOSE_MODEL = "gpt2-small (124M)"
-INPUT_PROMPT = "Every effort moves"
-
 BASE_CONFIG = {
-    "vocab_size": 50257, # Vocabulary size
-    "context_length": 1024, # Contextlength
-    "drop_rate": 0.0, # Dropout rate
-    "qkv_bias": True # Query-key-value bias
+    "vocab_size": 50257,
+    "context_length": 1024,
+    "drop_rate": 0.0,
+    "qkv_bias": True
 }
 
 model_configs = {
@@ -1960,126 +1888,71 @@ model_configs = {
     "gpt2-xl (1558M)": {"emb_dim": 1600, "n_layers": 48, "n_heads": 25},
 }
 
+# To begin the model preparation process, we employ the same configurations we used to pretrain unlabeled data:
+
+CHOOSE_MODEL = "gpt2-small (124M)"
+INPUT_PROMPT = "Every effort moves"
 BASE_CONFIG.update(model_configs[CHOOSE_MODEL])
 
-model_size = CHOOSE_MODEL.split(" ")[-1].lstrip("(").rstrip(")")
-
-settings, params = download_and_load_gpt2(
-    model_size=model_size, models_dir="gpt2"
-)
-
-model = GPTModel(BASE_CONFIG)
-load_weights_into_gpt(model, params)
-model.eval()
-
-text_1 = "Every effort moves you"
-token_ids = generate_text_simple(
-    model=model,
-    idx=text_to_token_ids(text_1, tokenizer),
-    max_new_tokens=15,
-    context_size=BASE_CONFIG["context_length"]
-)
-
-print("Testing current results: \n")
-print(token_ids_to_text(token_ids, tokenizer))
-print("\n")
-
+# Test if the model can classify?
 text_2 = (
-            "Is the following text 'spam'? Answer with 'yes' or 'no':"
-            " 'You are a winner you have been specially"
-            " selected to receive $1000 cash or a $2000 award.'"
-    )
+    "Is the following text 'spam'? Answer with 'yes' or 'no':"
+    " 'You are a winner you have been specially"
+    " selected to receive $1000 cash or a $2000 award.'"
+)
 
 token_ids = generate_text_simple(
     model=model,
     idx=text_to_token_ids(text_2, tokenizer),
     max_new_tokens=23,
     context_size=BASE_CONFIG["context_length"]
-    )
+)
 
-#
 print(token_ids_to_text(token_ids, tokenizer))
 
-# A recap: print the model architecture via 
-print("This is the current model architecture: ", model)
-
-# NOTES: In neural network-based language models, the lower layers generally capture basic lan- guage structures and semantics applicable across a wide range of tasks and datasets. 
-# So, fine-tuning only the last layers (i.e., layers near the output), which are more specific to nuanced linguistic patterns and task-specific features, is often sufficient to adapt
-# the model to new tasks. A nice side effect is that it is computationally more efficient to fine- tune only a small number of layers. 
-
-# To get the model ready for classification fine-tuning, 
-# we first freeze the model, meaning that we make all layers nontrainable:
+# Freeze the model in selected layers
 for param in model.parameters():
     param.requires_grad = False
 
-# Adding a classification layer:
-torch.manual_seed(123)
-
-num_classes = 2
-
-model.out_head = torch.nn.Linear(
-    in_features=BASE_CONFIG["emb_dim"],
-    out_features=num_classes
-)
-
-# This new model.out_head output layer has its requires_grad attribute set to True by default, which means that it’s the only layer in the model that will be updated during training. 
-# Technically, training the output layer we just added is sufficient. However, fine-tuning additional layers can noticeably improve the predictive performance of the model.
+# Selectively freeze the layers: Final Transformer block and normalisation layer:
 for param in model.trf_blocks[-1].parameters():
     param.requires_grad = True
 
 for param in model.final_norm.parameters():
     param.requires_grad = True
 
+# Replace the out head:
+torch.manual_seed(123)
+num_classes = 2
+model.out_head = torch.nn.Linear(
+    in_features=BASE_CONFIG["emb_dim"],
+    out_features=num_classes
+)
+
 inputs = tokenizer.encode("Do you have time")
 inputs = torch.tensor(inputs).unsqueeze(0)
+
 print("Inputs:", inputs)
 print("Inputs dimensions:", inputs.shape)
 
 with torch.no_grad():
     outputs = model(inputs)
+
 print("Outputs:\n", outputs)
 print("Outputs dimensions:", outputs.shape)
 
-# To extract the last output token from the output tensor, we use the following code:
+# Since we’re interested in fine-tuning the model to return a class label, we don’t need to fine-tune all four output rows. 
+# We just focus on the last row corresponding to the last token.
+# The last token is the only token with an attention score to all other tokens. The others have had some tokens masked.
+
 print("Last output token:", outputs[:, -1, :])
 
-#Note: We still need to convert the values into a class-label prediction.
-# We can obtain the class label like this:
-probas = torch.softmax(outputs[:, -1, :], dim=-1)
-label = torch.argmax(probas)
-print("Class label:", label.item())
 
-logits = outputs[:, -1, :]
-label = torch.argmax(logits)
-print("Class label:", label.item())
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # model automatically runs on a GPU if a GPU with Nvidia CUDA support is available and otherwise runs on a CPU
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model.to(device)
+
 torch.manual_seed(123)
 
 train_accuracy = calc_accuracy_loader(
     train_loader, model, device, num_batches=10
 )
-
-val_accuracy = calc_accuracy_loader(
-    val_loader, model, device, num_batches=10
-)
-
-test_accuracy = calc_accuracy_loader(
-    test_loader, model, device, num_batches=10
-)
-
-print(f"Training accuracy: {train_accuracy*100:.2f}%")
-print(f"Validation accuracy: {val_accuracy*100:.2f}%")
-print(f"Test accuracy: {test_accuracy*100:.2f}%")
-
-with torch.no_grad():
-    train_loss = calc_loss_loader_v2(
-        train_loader, model, device, num_batches=5
-    ) # Disables gradient tracking for efficiency because we are not training yet
-    val_loss = calc_loss_loader_v2(val_loader, model, device, num_batches=5)
-    test_loss = calc_loss_loader_v2(test_loader, model, device, num_batches=5)
-
-print(f"Training loss: {train_loss:.3f}")
-print(f"Validation loss: {val_loss:.3f}")
-print(f"Test loss: {test_loss:.3f}")
