@@ -10,8 +10,109 @@ from gpt_download import download_and_load_gpt2
 import torch.nn as nn
 import logging
 import numpy as np
+import time
+import matplotlib.pyplot as plt
 
 logger = logging.getLogger(__name__)
+
+def evaluate_model(model, train_loader, val_loader, device, eval_iter):
+    model.eval()
+    with torch.no_grad():
+        train_loss = calc_loss_loader(train_loader, model, device, num_batches=eval_iter)
+        val_loss = calc_loss_loader(val_loader, model, device, num_batches=eval_iter)
+    model.train()
+    return train_loss, val_loss
+
+def calc_loss_batch(input_batch, target_batch, model, device):
+    input_batch, target_batch = input_batch.to(device), target_batch.to(device)
+    logits = model(input_batch)
+    loss = torch.nn.functional.cross_entropy(logits.flatten(0, 1), target_batch.flatten())
+    return loss
+
+def train_model_simple(model, train_loader, val_loader, optimizer, scheduler, cfg, num_epochs=1):
+    train_losses = []
+    val_losses = []
+    tokens_seen = 0
+    
+    for epoch in range(num_epochs):
+        accumulation_steps = 4  # Accumulate gradients over 4 steps
+        optimizer.zero_grad()
+        for i, batch in enumerate(train_loader):
+            loss = model(batch)
+            (loss / accumulation_steps).backward()
+            if (i + 1) % accumulation_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad()
+        
+        train_loss, val_loss = evaluate_model(model, train_loader, val_loader, device, 10)
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
+        tokens_seen += len(train_loader) * cfg["batch_size"]
+    
+    return train_losses, val_losses, tokens_seen
+
+def calc_loss_loader(data_loader, model, device, num_batches=None):
+    total_loss = 0.
+    if len(data_loader) == 0:
+        return float("nan")
+    elif num_batches is None:
+        num_batches = len(data_loader)
+    else:
+        num_batches = min(num_batches, len(data_loader))
+    for i, (input_batch, target_batch) in enumerate(data_loader):
+        if i < num_batches:
+            loss = calc_loss_batch(input_batch, target_batch, model, device)
+            total_loss += loss.item()
+        else:
+            break
+    return total_loss / num_batches
+
+def token_ids_to_text(token_ids, tokenizer):
+    flat = token_ids.squeeze(0)  # remove batch dimension
+    return tokenizer.decode(flat.tolist())
+
+def text_to_token_ids(text, tokenizer):
+    encoded = tokenizer.encode(text)
+    encoded_tensor = torch.tensor(encoded).unsqueeze(0)  # add batch dimension
+    return encoded_tensor
+
+def generate(model, idx, max_new_tokens, context_size, temperature=0.0, top_k=None, eos_id=None):
+
+    # For-loop is the same as before: Get logits, and only focus on last time step
+    for _ in range(max_new_tokens):
+        idx_cond = idx[:, -context_size:]
+        with torch.no_grad():
+            logits = model(idx_cond)
+        logits = logits[:, -1, :]
+
+        # New: Filter logits with top_k sampling
+        if top_k is not None:
+            # Keep only top_k values
+            top_logits, _ = torch.topk(logits, top_k)
+            min_val = top_logits[:, -1]
+            logits = torch.where(logits < min_val, torch.tensor(float('-inf')).to(logits.device), logits)
+
+        # New: Apply temperature scaling
+        if temperature > 0.0:
+            logits = logits / temperature
+
+            # Apply softmax to get probabilities
+            probs = torch.softmax(logits, dim=-1)  # (batch_size, context_len)
+
+            # Sample from the distribution
+            idx_next = torch.multinomial(probs, num_samples=1)  # (batch_size, 1)
+
+        # Otherwise same as before: get idx of the vocab entry with the highest logits value
+        else:
+            idx_next = torch.argmax(logits, dim=-1, keepdim=True)  # (batch_size, 1)
+
+        if idx_next == eos_id:  # Stop generating early if end-of-sequence token is encountered and eos_id is specified
+            break
+
+        # Same as before: append sampled index to the running sequence
+        idx = torch.cat((idx, idx_next), dim=1)  # (batch_size, num_tokens+1)
+
+    return idx
 
 def assign(left, right):
     if left.shape != right.shape:
@@ -105,6 +206,8 @@ class MultiHeadAttention(nn.Module):
         self.W_value = nn.Linear(self.emb_dim, self.emb_dim, bias=cfg["qkv_bias"])
         self.out_proj = nn.Linear(self.emb_dim, self.emb_dim)  # Linear layer to combine head outputs
         self.register_buffer('mask', torch.triu(torch.ones(self.context_length, self.context_length), diagonal=1))
+        self.attn_dropout = nn.Dropout(cfg["drop_rate"])
+        self.resid_dropout = nn.Dropout(cfg["drop_rate"])
 
     def forward(self, x):
         b, num_tokens, d_in = x.shape
@@ -134,7 +237,7 @@ class MultiHeadAttention(nn.Module):
         attn_scores.masked_fill_(mask_bool, -torch.inf)
 
         attn_weights = torch.softmax(attn_scores / keys.shape[-1]**0.5, dim=-1)
-        attn_weights = self.dropout(attn_weights)
+        attn_weights = self.attn_dropout(attn_weights)
 
         # Shape: (b, num_tokens, num_heads, head_dim)
         context_vec = (attn_weights @ values).transpose(1, 2)
@@ -240,7 +343,11 @@ class GPTModel(nn.Module):
         self.is_classification = False
         self.debug = True
         logger.info(f"Initialized GPTModel with config: {cfg}")
+        self.use_checkpointing = False
         
+    def gradient_checkpointing_enable(self):
+        self.use_checkpointing = True
+    
     def forward(self, in_idx):
         if self.debug:
             logger.debug(f"\nGPTModel forward pass:")
@@ -258,7 +365,10 @@ class GPTModel(nn.Module):
             
         x = tok_embeds + pos_embeds
         x = self.drop_emb(x)
-        x = self.trf_blocks(x)
+        if self.use_checkpointing and self.training:
+            x = torch.utils.checkpoint.checkpoint(self.trf_blocks, x)
+        else:
+            x = self.trf_blocks(x)
         x = self.final_norm(x)
         
         if self.is_classification:
@@ -445,7 +555,7 @@ customized_collate_fn = partial(
 
 # Initializing the data loaders
 num_workers = 0
-batch_size = 8
+batch_size = 4
 
 torch.manual_seed(123)
 
@@ -486,7 +596,8 @@ BASE_CONFIG = {
     "vocab_size": 50257,     # Vocabulary size
     "context_length": 1024,  # Context length
     "drop_rate": 0.0,        # Dropout rate
-    "qkv_bias": True         # Query-key-value bias
+    "qkv_bias": True,         # Query-key-value bias
+    "batch_size": 4,  # Reduce from 8 to 4 or smaller
 }
 model_configs = {
     "gpt2-small (124M)": {"emb_dim": 768, "n_layers": 12, "n_heads": 12},
@@ -508,3 +619,77 @@ model = GPTModel(BASE_CONFIG)
 load_weights_into_gpt(model, params)
 model.eval();
 
+# assess the pretrained LLM's performance on one of the validation tasks by comparing its output to the expected response
+# baseline understanding of how well the model performs on an instruction-following task right out of the box, prior to fine-tuning
+
+torch.manual_seed(123)
+input_text = format_input(val_data[0])
+print(input_text)
+
+token_ids = generate(
+    model=model,
+    idx=text_to_token_ids(input_text, tokenizer),
+    max_new_tokens=35,
+    context_size=BASE_CONFIG["context_length"],
+    eos_id=50256,
+)
+
+generated_text = token_ids_to_text(token_ids, tokenizer)
+
+# To isolate the model's response text, we need to subtract the length of the input instruction from the start of the generated_text:
+response_text = generated_text[len(input_text):].strip()
+# At this point, we can compare the response_text to the expected response. We can't expect the model to perform well at this point as it has not been trained yet.
+print(response_text)
+
+# Next steps: Fine Tuning the LLM model on instruction response data.
+model.to(device)
+torch.manual_seed(123)
+with torch.no_grad():
+    train_loss = calc_loss_loader(
+        train_loader, model, device, num_batches=5
+    )
+    val_loss = calc_loss_loader(
+        val_loader, model, device, num_batches=5
+)
+print("Before training: Training loss:", train_loss)
+print("Before training: Validation loss:", val_loss)
+
+# Now train the model: Instruction fine-tune a pretrained LLM
+
+start_time = time.time()
+torch.manual_seed(123)
+optimizer = torch.optim.AdamW(
+    model.parameters(), lr=0.00005, weight_decay=0.1
+)
+num_epochs = 2
+train_losses, val_losses, tokens_seen = train_model_simple(
+    model, train_loader, val_loader, optimizer, device,
+    num_epochs=num_epochs, eval_freq=5, eval_iter=5,
+    start_context=format_input(val_data[0]), tokenizer=tokenizer
+)
+end_time = time.time()
+execution_time_minutes = (end_time - start_time) / 60
+print(f"Training completed in {execution_time_minutes:.2f} minutes.")
+
+
+# plot the training and validation losses over the course of the training process
+epochs_tensor = torch.linspace(0, num_epochs, len(train_losses))
+plot_losses(epochs_tensor, tokens_seen, train_losses, val_losses)
+
+def plot_losses(epochs_seen, tokens_seen, train_losses, val_losses):
+    fig, ax1 = plt.subplots()
+
+    # Plot training and validation loss against epochs
+    ax1.plot(epochs_seen, train_losses, label="Training loss")
+    ax1.plot(epochs_seen, val_losses, linestyle="-.", label="Validation loss")
+    ax1.set_xlabel("Epochs")
+    ax1.set_ylabel("Loss")
+    ax1.legend(loc="upper right")
+
+    # Create a second x-axis for tokens seen
+    ax2 = ax1.twiny()  # Create a second x-axis that shares the same y-axis
+    ax2.plot(tokens_seen, train_losses, alpha=0)  # Invisible plot for aligning ticks
+    ax2.set_xlabel("Tokens seen")
+
+    fig.tight_layout()  # Adjust layout to make room
+    plt.show()
