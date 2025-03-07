@@ -8,7 +8,6 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import sys
 import torch.nn as nn
-import matplotlib.pyplot as plt
 from gpt_download import download_and_load_gpt2
 import numpy as np
 import pandas as pd
@@ -125,6 +124,24 @@ class SpamDataset(Dataset):
             tokens = tokens + [0] * (self.max_length - len(tokens))
         
         return torch.tensor(tokens), label_tensor
+
+def plot_values( epochs_seen, examples_seen, train_values, val_values, label="loss"):
+    fig, ax1 = plt.subplots(figsize=(5, 3))
+    # Plots training and validation loss against epochs
+    ax1.plot(epochs_seen, train_values, label=f"Training {label}")
+    ax1.plot(epochs_seen, val_values, linestyle="-.", label=f"Validation {label}")
+    ax1.set_xlabel("Epochs")
+    ax1.set_ylabel(label.capitalize())
+    ax1.legend()
+    # Creates a second x-axis for examples seen
+    ax2 = ax1.twiny()
+    ax2.plot(examples_seen, train_values, alpha=0)
+    ax2.set_xlabel("Examples seen")
+    # Invisible plot for aligning ticks
+    fig.tight_layout()
+    plt.savefig(f"{label}-plot.pdf")
+    plt.show()
+    # Adjusts layout to make room
 
 def calc_loss_loader(data_loader, model, device, num_batches=None):
     model.eval()
@@ -713,5 +730,30 @@ prediction2, confidence2 = classify_review(
 )
 logger.info(f"Classification: {prediction2} (confidence: {confidence2:.4f})")
 
+epochs_tensor = torch.linspace(0, num_epochs, len(train_losses))
+examples_seen_tensor = torch.linspace(0, examples_seen, len(train_losses))
+plot_values(epochs_tensor, examples_seen_tensor, train_losses, val_losses)
 
+# If there is a sharp downward slope in the plot for both curves, the model is learning well from the training data, 
+# and there is little to no indication of overfitting; that is, there is no noticeable gap between the 
+# training and validation set losses.
+
+# save the model
+torch.save(model.state_dict(), "review_classifier.pth")
+
+# plot the classification accuracies
+epochs_tensor = torch.linspace(0, num_epochs, len(train_accs))
+examples_seen_tensor = torch.linspace(0, examples_seen, len(train_accs))
+
+plot_values(
+    epochs_tensor, examples_seen_tensor, train_accs, val_accs,
+    label="accuracy"
+)
+
+train_accuracy = calc_accuracy_loader(train_loader, model, device)
+val_accuracy = calc_accuracy_loader(val_loader, model, device)
+test_accuracy = calc_accuracy_loader(test_loader, model, device)
+print(f"Training accuracy: {train_accuracy*100:.2f}%")
+print(f"Validation accuracy: {val_accuracy*100:.2f}%")
+print(f"Test accuracy: {test_accuracy*100:.2f}%")
 
