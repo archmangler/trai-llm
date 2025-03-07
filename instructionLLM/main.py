@@ -794,7 +794,7 @@ num_epochs = 2
 
 # Define the configuration dictionary with all necessary parameters
 cfg = {
-    'batch_size': 4,  # From your data loader
+    'batch_size': 2,  # Reduce from 4 to 2
     'context_length': 91,  # Maximum sequence length in your data
     'learning_rate': 1e-4,
     'num_epochs': 10,
@@ -804,7 +804,10 @@ cfg = {
     'num_heads': 12,
     'num_layers': 12,
     'dropout': 0.1,
-    'device': 'mps'  # From your logs
+    'device': 'mps',  # From your logs
+    'gradient_accumulation_steps': 4,  # Simulate batch_size=8
+    'use_gradient_checkpointing': True,
+    'use_mixed_precision': True
 }
 
 # Modify the function call to only pass the required positional arguments
@@ -837,12 +840,15 @@ def main():
         'n_layer': 12,
         'vocab_size': 50257,
         'num_epochs': 3,
-        'batch_size': 4,
+        'batch_size': 2,  # Reduce from 4 to 2
         'learning_rate': 1e-4,
         'max_seq_length': 1024,
         'dropout': 0.1,
         'weight_decay': 0.01,
-        'device': 'mps'
+        'device': 'mps',
+        'gradient_accumulation_steps': 4,  # Simulate batch_size=8
+        'use_gradient_checkpointing': True,
+        'use_mixed_precision': True
     }
     
     # Create config object
