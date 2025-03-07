@@ -469,7 +469,8 @@ class GPTModel(nn.Module):
         self.debug = True
         logger.info(f"Initialized GPTModel with config: {cfg}")
         self.use_checkpointing = False
-        self.gradient_checkpointing_enable()  # Enable gradient checkpointing
+        if hasattr(self, 'gradient_checkpointing_enable'):
+            self.gradient_checkpointing_enable()
         
     def gradient_checkpointing_enable(self):
         self.use_checkpointing = True
