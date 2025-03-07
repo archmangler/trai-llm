@@ -73,7 +73,7 @@ except Exception as e:
 # Configuration
 cfg = {
     'max_length': 91,  # Based on max length seen in your data
-    'batch_size': 4,   # From your data loader
+    'batch_size': 2,   # From your data loader
     'vocab_size': tokenizer.vocab_size,
     # ... other config parameters ...
 }
@@ -122,37 +122,35 @@ def train_model_simple(model, train_loader, val_loader, optimizer, scheduler, cf
     val_losses = []
     tokens_seen = 0
     
-    # Default accumulation steps if not in config
-    gradient_accumulation_steps = cfg.get('gradient_accumulation_steps', 4)
-    optimizer.zero_grad()
-    
-    print(f"Starting training for {cfg['num_epochs']} epochs...")
-    
+    # Remove autocast for MPS device
     for epoch in range(cfg['num_epochs']):
         model.train()
         epoch_losses = []
+        
+        gradient_accumulation_steps = cfg.get('gradient_accumulation_steps', 4)
+        optimizer.zero_grad()
         
         for batch_idx, batch in enumerate(train_loader):
             inputs, targets = batch
             inputs = inputs.to(cfg['device'])
             targets = targets.to(cfg['device'])
             
-            # Use mixed precision
-            with autocast(device_type='mps'):
-                logits = model(inputs)
-                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+            # Forward pass with scaled loss
+            logits = model(inputs)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+            loss = loss / gradient_accumulation_steps
+            loss.backward()
             
-            scaler = GradScaler()
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-            optimizer.zero_grad()
+            # Only optimize after accumulating gradients
+            if (batch_idx + 1) % gradient_accumulation_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad()
             
-            epoch_losses.append(loss.item() * gradient_accumulation_steps)
+            epoch_losses.append(loss.item())
             tokens_seen += inputs.numel()
             
             if batch_idx % 100 == 0:
-                print(f"Epoch {epoch+1}/{cfg['num_epochs']}, Batch {batch_idx}, Loss: {loss.item() * gradient_accumulation_steps:.4f}")
+                print(f"Epoch {epoch+1}/{cfg['num_epochs']}, Batch {batch_idx}, Loss: {loss.item():.4f}")
         
         avg_loss = sum(epoch_losses) / len(epoch_losses)
         train_losses.append(avg_loss)
