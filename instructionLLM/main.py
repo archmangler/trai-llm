@@ -21,6 +21,7 @@ from transformers import GPT2Tokenizer
 from huggingface_hub import login
 import requests
 from pathlib import Path
+from torch.cuda.amp import autocast, GradScaler
 
 print("Python path:", sys.executable)
 print("PYTHONPATH:", os.environ.get('PYTHONPATH', ''))
@@ -136,16 +137,16 @@ def train_model_simple(model, train_loader, val_loader, optimizer, scheduler, cf
             inputs = inputs.to(cfg['device'])
             targets = targets.to(cfg['device'])
             
-            # Forward pass with scaled loss
-            logits = model(inputs)
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
-            loss = loss / gradient_accumulation_steps
-            loss.backward()
+            # Use mixed precision
+            with autocast(device_type='mps'):
+                logits = model(inputs)
+                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
             
-            # Only optimize after accumulating gradients
-            if (batch_idx + 1) % gradient_accumulation_steps == 0:
-                optimizer.step()
-                optimizer.zero_grad()
+            scaler = GradScaler()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
             
             epoch_losses.append(loss.item() * gradient_accumulation_steps)
             tokens_seen += inputs.numel()
@@ -470,6 +471,7 @@ class GPTModel(nn.Module):
         self.debug = True
         logger.info(f"Initialized GPTModel with config: {cfg}")
         self.use_checkpointing = False
+        self.gradient_checkpointing_enable()  # Enable gradient checkpointing
         
     def gradient_checkpointing_enable(self):
         self.use_checkpointing = True
