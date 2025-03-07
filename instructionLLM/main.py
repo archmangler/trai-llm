@@ -12,8 +12,70 @@ import logging
 import numpy as np
 import time
 import matplotlib.pyplot as plt
+import torch.nn.functional as F
+import sys
+import site
+site.addsitedir('/Users/traiano/Desktop/tllm/trai-llm/.venv/lib/python3.12/site-packages')
+
+from transformers import GPT2Tokenizer
+from huggingface_hub import login
+import requests
+from pathlib import Path
+
+print("Python path:", sys.executable)
+print("PYTHONPATH:", os.environ.get('PYTHONPATH', ''))
+print("sys.path:", sys.path)
 
 logger = logging.getLogger(__name__)
+
+def download_tokenizer_files():
+    # Create cache directory
+    cache_dir = Path(__file__).parent / "cache" / "gpt2"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Files needed for GPT-2 tokenizer
+    files = {
+        'vocab.json': 'https://huggingface.co/gpt2/raw/main/vocab.json',
+        'merges.txt': 'https://huggingface.co/gpt2/raw/main/merges.txt',
+        'tokenizer.json': 'https://huggingface.co/gpt2/raw/main/tokenizer.json'
+    }
+    
+    # Download each file
+    for filename, url in files.items():
+        filepath = cache_dir / filename
+        if not filepath.exists():
+            print(f"Downloading {filename}...")
+            response = requests.get(url)
+            response.raise_for_status()
+            filepath.write_bytes(response.content)
+            print(f"Downloaded {filename}")
+    
+    return str(cache_dir)
+
+# Download files and get cache directory
+try:
+    cache_dir = download_tokenizer_files()
+    print(f"Using cache directory: {cache_dir}")
+    
+    # Load tokenizer from local files
+    tokenizer = GPT2Tokenizer.from_pretrained(
+        cache_dir,
+        local_files_only=True
+    )
+    tokenizer.pad_token = tokenizer.eos_token
+    print("Tokenizer loaded successfully!")
+
+except Exception as e:
+    print(f"Error during tokenizer setup: {e}")
+    raise
+
+# Configuration
+cfg = {
+    'max_length': 91,  # Based on max length seen in your data
+    'batch_size': 4,   # From your data loader
+    'vocab_size': tokenizer.vocab_size,
+    # ... other config parameters ...
+}
 
 def evaluate_model(model, train_loader, val_loader, device, eval_iter):
     model.eval()
@@ -29,25 +91,89 @@ def calc_loss_batch(input_batch, target_batch, model, device):
     loss = torch.nn.functional.cross_entropy(logits.flatten(0, 1), target_batch.flatten())
     return loss
 
-def train_model_simple(model, train_loader, val_loader, optimizer, scheduler, cfg, num_epochs=1):
+# 1. Create a Config class to handle configuration
+class TrainingConfig:
+    def __init__(self, config_dict):
+        # Model parameters
+        self.n_embd = config_dict.get('n_embd', 768)
+        self.n_head = config_dict.get('n_head', 12)
+        self.n_layer = config_dict.get('n_layer', 12)
+        self.vocab_size = config_dict.get('vocab_size', 50257)
+        
+        # Training parameters
+        self.num_epochs = config_dict.get('num_epochs', 3)
+        self.batch_size = config_dict.get('batch_size', 4)
+        self.learning_rate = config_dict.get('learning_rate', 1e-4)
+        self.max_seq_length = config_dict.get('max_seq_length', 1024)
+        self.dropout = config_dict.get('dropout', 0.1)
+        
+        # Optimizer parameters
+        self.weight_decay = config_dict.get('weight_decay', 0.01)
+        self.beta1 = config_dict.get('beta1', 0.9)
+        self.beta2 = config_dict.get('beta2', 0.999)
+        
+        # Device configuration
+        self.device = config_dict.get('device', 'mps')
+
+# 2. Update the training function to use the config object
+def train_model_simple(model, train_loader, val_loader, optimizer, scheduler, cfg):
     train_losses = []
     val_losses = []
     tokens_seen = 0
     
-    for epoch in range(num_epochs):
-        accumulation_steps = 4  # Accumulate gradients over 4 steps
-        optimizer.zero_grad()
-        for i, batch in enumerate(train_loader):
-            loss = model(batch)
-            (loss / accumulation_steps).backward()
-            if (i + 1) % accumulation_steps == 0:
+    # Default accumulation steps if not in config
+    gradient_accumulation_steps = cfg.get('gradient_accumulation_steps', 4)
+    optimizer.zero_grad()
+    
+    print(f"Starting training for {cfg['num_epochs']} epochs...")
+    
+    for epoch in range(cfg['num_epochs']):
+        model.train()
+        epoch_losses = []
+        
+        for batch_idx, batch in enumerate(train_loader):
+            inputs, targets = batch
+            inputs = inputs.to(cfg['device'])
+            targets = targets.to(cfg['device'])
+            
+            # Forward pass with scaled loss
+            logits = model(inputs)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+            loss = loss / gradient_accumulation_steps
+            loss.backward()
+            
+            # Only optimize after accumulating gradients
+            if (batch_idx + 1) % gradient_accumulation_steps == 0:
                 optimizer.step()
                 optimizer.zero_grad()
+            
+            epoch_losses.append(loss.item() * gradient_accumulation_steps)
+            tokens_seen += inputs.numel()
+            
+            if batch_idx % 100 == 0:
+                print(f"Epoch {epoch+1}/{cfg['num_epochs']}, Batch {batch_idx}, Loss: {loss.item() * gradient_accumulation_steps:.4f}")
         
-        train_loss, val_loss = evaluate_model(model, train_loader, val_loader, device, 10)
-        train_losses.append(train_loss)
-        val_losses.append(val_loss)
-        tokens_seen += len(train_loader) * cfg["batch_size"]
+        avg_loss = sum(epoch_losses) / len(epoch_losses)
+        train_losses.append(avg_loss)
+        
+        # Validation step
+        model.eval()
+        val_epoch_losses = []
+        with torch.no_grad():
+            for val_batch in val_loader:
+                val_inputs, val_targets = val_batch
+                val_inputs = val_inputs.to(cfg['device'])
+                val_targets = val_targets.to(cfg['device'])
+                val_loss = model(val_inputs)
+                val_epoch_losses.append(val_loss.item())
+        
+        avg_val_loss = sum(val_epoch_losses) / len(val_epoch_losses)
+        val_losses.append(avg_val_loss)
+        
+        print(f"Epoch {epoch+1} complete. Train Loss: {avg_loss:.4f}, Val Loss: {avg_val_loss:.4f}")
+        
+        if scheduler is not None:
+            scheduler.step()
     
     return train_losses, val_losses, tokens_seen
 
@@ -348,44 +474,41 @@ class GPTModel(nn.Module):
     def gradient_checkpointing_enable(self):
         self.use_checkpointing = True
     
-    def forward(self, in_idx):
-        if self.debug:
-            logger.debug(f"\nGPTModel forward pass:")
-            logger.debug(f"Input shape: {in_idx.shape}")
-            
-        batch_size, seq_len = in_idx.shape
-        tok_embeds = self.tok_emb(in_idx)
-        pos_embeds = self.pos_emb(
-            torch.arange(seq_len, device=in_idx.device)
-        )
-        
-        if self.debug:
-            logger.debug(f"Token embeddings shape: {tok_embeds.shape}")
-            logger.debug(f"Position embeddings shape: {pos_embeds.shape}")
-            
-        x = tok_embeds + pos_embeds
-        x = self.drop_emb(x)
-        if self.use_checkpointing and self.training:
-            x = torch.utils.checkpoint.checkpoint(self.trf_blocks, x)
+    def forward(self, batch):
+        # Check if we're getting a tuple (during training) or single tensor (during generation)
+        if isinstance(batch, tuple):
+            input_ids, target_ids = batch
         else:
-            x = self.trf_blocks(x)
-        x = self.final_norm(x)
+            input_ids = batch
+            target_ids = None  # During generation, we don't have targets
         
-        if self.is_classification:
-            if self.debug:
-                logger.debug("Classification mode: using last token representation")
-                logger.debug(f"Pre-classification shape: {x.shape}")
-            x = x[:, -1, :]
-            if self.debug:
-                logger.debug(f"Post-classification shape: {x.shape}")
+        # Move input_ids to the same device as the model
+        input_ids = input_ids.to(self.tok_emb.weight.device)
+        if target_ids is not None:
+            target_ids = target_ids.to(self.tok_emb.weight.device)
         
+        # Get embeddings
+        tok_emb = self.tok_emb(input_ids)
+        pos_emb = self.pos_emb(torch.arange(input_ids.shape[1], device=input_ids.device))
+        x = tok_emb + pos_emb
+        
+        # Apply transformer blocks
+        for block in self.trf_blocks:
+            x = block(x)
+        
+        # Get logits
         logits = self.out_head(x)
-        if self.debug:
-            logger.debug(f"Final output shape: {logits.shape}")
-            if self.is_classification:
-                logger.debug(f"Classification logits: {logits}")
         
-        return logits
+        if target_ids is not None:
+            # Training mode - return loss
+            B, T, C = logits.shape
+            logits = logits.view(B*T, C)
+            target_ids = target_ids.view(B*T)
+            loss = F.cross_entropy(logits, target_ids)
+            return loss
+        else:
+            # Generation mode - return logits
+            return logits
 
 
 # Custom collate function to handle variable-length sequences and thus padd each sequence to the longest sequence in the batch
@@ -447,35 +570,42 @@ def custom_collate_draft_2(
     return inputs_tensor, targets_tensor
 
 # final draft custom collate function
-def custom_collate_fn(
-            batch,
-            pad_token_id=50256,
-            ignore_index=-100,
-            allowed_max_length=None,
-            device="cpu"
-        ):
-            batch_max_length = max(len(item)+1 for item in batch)
-            inputs_lst, targets_lst = [], []
-            for item in batch:
-                new_item = item.copy()
-                new_item += [pad_token_id]
-                padded = (
-                    new_item + [pad_token_id] *(batch_max_length - len(new_item))
-                    )
-                inputs = torch.tensor(padded[:-1])
-                targets = torch.tensor(padded[1:])
-                mask = targets == pad_token_id
-                indices = torch.nonzero(mask).squeeze()
-                if indices.numel() > 1:
-                     targets[indices[1:]] = ignore_index
-                if allowed_max_length is not None:
-                    inputs = inputs[:allowed_max_length]
-                    targets = targets[:allowed_max_length]
-                inputs_lst.append(inputs)
-                targets_lst.append(targets)
-            inputs_tensor = torch.stack(inputs_lst).to(device)
-            targets_tensor = torch.stack(targets_lst).to(device)
-            return inputs_tensor, targets_tensor
+def custom_collate_fn(batch, **kwargs):
+    if isinstance(batch[0], list) and isinstance(batch[0][0], (int, torch.Tensor)):
+        # Convert to tensors but leave on CPU
+        sequences = [torch.tensor(seq) if isinstance(seq, list) else seq 
+                    for seq in batch]
+        
+        max_len = max(len(seq) for seq in sequences)
+        padded_sequences = [torch.cat([seq, 
+                                     torch.full((max_len - len(seq),), 
+                                              tokenizer.eos_token_id)]) 
+                          for seq in sequences]
+        
+        padded_batch = torch.stack(padded_sequences)
+        inputs = padded_batch[:, :-1]
+        targets = padded_batch[:, 1:]
+        
+        return inputs, targets
+
+def plot_losses(epochs_seen, tokens_seen, train_losses, val_losses):
+    fig, ax1 = plt.subplots()
+
+    # Plot training and validation loss against epochs
+    ax1.plot(epochs_seen, train_losses, label="Training loss")
+    ax1.plot(epochs_seen, val_losses, linestyle="-.", label="Validation loss")
+    ax1.set_xlabel("Epochs")
+    ax1.set_ylabel("Loss")
+    ax1.legend(loc="upper right")
+
+    # Create a second x-axis for tokens seen
+    ax2 = ax1.twiny()  # Create a second x-axis that shares the same y-axis
+    ax2.plot(tokens_seen, train_losses, alpha=0)  # Invisible plot for aligning ticks
+    ax2.set_xlabel("Tokens seen")
+
+    fig.tight_layout()  # Adjust layout to make room
+    plt.show()
+
 
 # Alpaca prompt formatting
 def format_input(entry):
@@ -517,7 +647,6 @@ print("Training set length:", len(train_data))
 print("Validation set length:", len(val_data))
 print("Test set length:", len(test_data))
 
-tokenizer = tiktoken.get_encoding("gpt2") 
 print(tokenizer.encode("<|endoftext|>", allowed_special={"<|endoftext|>"}))
 
 # Testing the custom collate function on a batch of 3 sequences
@@ -662,10 +791,33 @@ optimizer = torch.optim.AdamW(
     model.parameters(), lr=0.00005, weight_decay=0.1
 )
 num_epochs = 2
+
+# Define the configuration dictionary with all necessary parameters
+cfg = {
+    'batch_size': 4,  # From your data loader
+    'context_length': 91,  # Maximum sequence length in your data
+    'learning_rate': 1e-4,
+    'num_epochs': 10,
+    'warmup_steps': 1000,
+    'vocab_size': 50257,  # GPT-2 vocab size
+    'model_dim': 768,
+    'num_heads': 12,
+    'num_layers': 12,
+    'dropout': 0.1,
+    'device': 'mps'  # From your logs
+}
+
+# Modify the function call to only pass the required positional arguments
+scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.9)  # Example scheduler
+device = torch.device('mps')  # Your device
+
 train_losses, val_losses, tokens_seen = train_model_simple(
-    model, train_loader, val_loader, optimizer, device,
-    num_epochs=num_epochs, eval_freq=5, eval_iter=5,
-    start_context=format_input(val_data[0]), tokenizer=tokenizer
+    model=model,
+    train_loader=train_loader,
+    val_loader=val_loader,
+    optimizer=optimizer,
+    scheduler=scheduler,  # Make sure this is actually a scheduler object
+    cfg=cfg
 )
 end_time = time.time()
 execution_time_minutes = (end_time - start_time) / 60
@@ -676,20 +828,45 @@ print(f"Training completed in {execution_time_minutes:.2f} minutes.")
 epochs_tensor = torch.linspace(0, num_epochs, len(train_losses))
 plot_losses(epochs_tensor, tokens_seen, train_losses, val_losses)
 
-def plot_losses(epochs_seen, tokens_seen, train_losses, val_losses):
-    fig, ax1 = plt.subplots()
+# 3. Update the main training setup
+def main():
+    # Define configuration
+    config_dict = {
+        'n_embd': 768,
+        'n_head': 12,
+        'n_layer': 12,
+        'vocab_size': 50257,
+        'num_epochs': 3,
+        'batch_size': 4,
+        'learning_rate': 1e-4,
+        'max_seq_length': 1024,
+        'dropout': 0.1,
+        'weight_decay': 0.01,
+        'device': 'mps'
+    }
+    
+    # Create config object
+    cfg = TrainingConfig(config_dict)
+    
+    # Model setup
+    model = GPTModel(cfg).to(cfg.device)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=cfg.learning_rate,
+        weight_decay=cfg.weight_decay,
+        betas=(cfg.beta1, cfg.beta2)
+    )
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.9)
+    
+    # Training
+    train_losses, val_losses, tokens_seen = train_model_simple(
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        cfg=cfg
+    )
 
-    # Plot training and validation loss against epochs
-    ax1.plot(epochs_seen, train_losses, label="Training loss")
-    ax1.plot(epochs_seen, val_losses, linestyle="-.", label="Validation loss")
-    ax1.set_xlabel("Epochs")
-    ax1.set_ylabel("Loss")
-    ax1.legend(loc="upper right")
-
-    # Create a second x-axis for tokens seen
-    ax2 = ax1.twiny()  # Create a second x-axis that shares the same y-axis
-    ax2.plot(tokens_seen, train_losses, alpha=0)  # Invisible plot for aligning ticks
-    ax2.set_xlabel("Tokens seen")
-
-    fig.tight_layout()  # Adjust layout to make room
-    plt.show()
+if __name__ == "__main__":
+    main()
